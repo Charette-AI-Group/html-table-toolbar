@@ -482,6 +482,19 @@ table.tt-table {
     --tt-line-style: solid;
     --tt-line-color: var(--background-modifier-border);
     --tt-line: var(--tt-line-width) var(--tt-line-style) var(--tt-line-color);
+
+    /* Each cell side reads its own variable instead of being re-declared by
+       every layer that wants to change it. A pattern sets these on the table,
+       a marked row sets one on its <tr>, a marked column sets one on its own
+       cells — and a value declared on an element always beats one inherited
+       from an ancestor, whatever the selectors look like. Overriding by
+       inheritance rather than by specificity is what keeps this arrangement
+       free of escalating selectors and of forced overrides. */
+    --tt-b-top: var(--tt-line);
+    --tt-b-right: var(--tt-line);
+    --tt-b-bottom: var(--tt-line);
+    --tt-b-left: var(--tt-line);
+
     border-collapse: collapse;
     /* The table declares the same line as its cells. In the collapsed model
        the widest border wins the shared edge, so this is a second, independent
@@ -494,7 +507,10 @@ table.tt-table {
 
 table.tt-table th,
 table.tt-table td {
-    border: var(--tt-line);
+    border-top: var(--tt-b-top);
+    border-right: var(--tt-b-right);
+    border-bottom: var(--tt-b-bottom);
+    border-left: var(--tt-b-left);
     padding: 4px 9px;
     vertical-align: top;
     text-align: left;
@@ -518,142 +534,142 @@ table.tt-table :is(th, td):empty::after {
    `tr:last-child td`, `td:first-child` and `td:last-child`. Those out-specify
    a plain `table.tt-table td`, so without matching their reach a thickness
    change lands on the interior and the top of the table but stops dead at the
-   bottom, left and right — the edges those selectors own. */
-table.tt-table tr:first-child > :is(th, td) { border-top: var(--tt-line); }
-table.tt-table tr:last-child > :is(th, td) { border-bottom: var(--tt-line); }
-table.tt-table tr > :is(th, td):first-child { border-left: var(--tt-line); }
-table.tt-table tr > :is(th, td):last-child { border-right: var(--tt-line); }
+   bottom, left and right — the edges those selectors own.
+
+   These are the only rules that need to out-specify anything, and they read
+   the same variables as the rule above, so every override below still flows
+   through them untouched. */
+table.tt-table tr:first-child > :is(th, td) { border-top: var(--tt-b-top); }
+table.tt-table tr:last-child > :is(th, td) { border-bottom: var(--tt-b-bottom); }
+table.tt-table tr > :is(th, td):first-child { border-left: var(--tt-b-left); }
+table.tt-table tr > :is(th, td):last-child { border-right: var(--tt-b-right); }
 
 /* ---- Border patterns -----------------------------------------------------
    "Grid" is the default above and carries no class, so tables written before
    these existed keep their appearance untouched.
 
-   Each pattern repeats the edge selectors above, because the rules that fixed
-   the perimeter would otherwise out-specify the pattern and put the lines
-   back. Adding the pattern's own class raises these past them.
+   A pattern changes the variables on the table rather than re-declaring
+   borders on the cells, so it needs no selector reach at all — one rule each
+   instead of the five-selector lists this used to take.
 
    They work at all because the table is border-collapse: collapse — adjacent
    cells share one edge, so removing a side from every cell removes the line
    rather than leaving one neighbour's half behind. */
 
 /* Horizontal rules only: the typeset look, no vertical lines anywhere. */
-table.tt-table.tt-rules,
-table.tt-table.tt-rules :is(th, td),
-table.tt-table.tt-rules tr > :is(th, td):first-child,
-table.tt-table.tt-rules tr > :is(th, td):last-child {
+table.tt-table.tt-rules {
+    --tt-b-left: 0;
+    --tt-b-right: 0;
     border-left: 0;
     border-right: 0;
 }
 
 /* One line around the whole table. The cells declare `none`, which loses every
    border conflict in the collapsed model, leaving the table's own edge to win. */
-table.tt-table.tt-box :is(th, td),
-table.tt-table.tt-box tr:first-child > :is(th, td),
-table.tt-table.tt-box tr:last-child > :is(th, td),
-table.tt-table.tt-box tr > :is(th, td):first-child,
-table.tt-table.tt-box tr > :is(th, td):last-child {
-    border: 0;
+table.tt-table.tt-box {
+    --tt-b-top: 0;
+    --tt-b-right: 0;
+    --tt-b-bottom: 0;
+    --tt-b-left: 0;
 }
 
 /* No lines at all, the table's own edge included. */
-table.tt-table.tt-bare,
-table.tt-table.tt-bare :is(th, td),
-table.tt-table.tt-bare tr:first-child > :is(th, td),
-table.tt-table.tt-bare tr:last-child > :is(th, td),
-table.tt-table.tt-bare tr > :is(th, td):first-child,
-table.tt-table.tt-bare tr > :is(th, td):last-child {
+table.tt-table.tt-bare {
+    --tt-b-top: 0;
+    --tt-b-right: 0;
+    --tt-b-bottom: 0;
+    --tt-b-left: 0;
     border: 0;
 }
 
 /* ---- Individual row and column edges -------------------------------------
-   These are an explicit choice about one specific edge, laid over whatever
-   pattern the table carries. `!important` rather than another round of
-   specificity escalation: they have to beat the pattern rules above (which
-   run to four class-level selectors) AND Obsidian's own `tr:last-child td`
-   family, and stacking classes far enough to out-rank both would be both
-   unreadable and fragile. Removing the class removes the rule entirely, so
-   nothing here can get stuck on.
+   An explicit choice about one specific edge, laid over whatever pattern the
+   table carries. Each sets the variable that side reads: on the <tr> for a
+   row, and on the marked cells for a column, which has no element of its own.
+   Both sit closer to the cell than the table does, so they win by inheritance
+   and never have to out-specify the pattern. Removing the class removes the
+   override entirely, so nothing here can get stuck on.
 
-   The var() chains are written out in full here rather than composed into a
-   single --tt-row-line on the table, which is a trap: a custom property's
-   var()s are substituted where that property is DECLARED, so composing it on
-   the table would bake the table's values in and every row would inherit the
-   same finished string. Spelled out on the cell, each var() resolves against
-   what that cell actually inherits — from its own <tr>, or its own style
-   attribute, or failing both the table. That is what lets row 2 be red while
-   row 4 is blue. */
-table.tt-table tr.tt-rt > :is(th, td) {
-    border-top:
+   Each var() chain is spelled out where it is declared, not composed into one
+   property on the table, which is a trap: a custom property's var()s are
+   substituted where that property is DECLARED, so composing it on the table
+   would bake the table's values in and every row would inherit the same
+   finished string. Declared on the <tr>, it resolves against that row's own
+   style attribute — which is what lets row 2 be red while row 4 is blue. */
+table.tt-table tr.tt-rt {
+    --tt-b-top:
         var(--tt-row-width, var(--tt-line-width))
         var(--tt-row-style, var(--tt-line-style))
-        var(--tt-row-color, var(--tt-line-color)) !important;
+        var(--tt-row-color, var(--tt-line-color));
 }
 
-table.tt-table tr.tt-rb > :is(th, td),
-table.tt-table tr.tt-rule > :is(th, td) {
-    border-bottom:
+table.tt-table tr.tt-rb,
+table.tt-table tr.tt-rule {
+    --tt-b-bottom:
         var(--tt-row-width, var(--tt-line-width))
         var(--tt-row-style, var(--tt-line-style))
-        var(--tt-row-color, var(--tt-line-color)) !important;
+        var(--tt-row-color, var(--tt-line-color));
 }
 
 table.tt-table :is(th, td).tt-cl {
-    border-left:
+    --tt-b-left:
         var(--tt-cl-width, var(--tt-line-width))
         var(--tt-cl-style, var(--tt-line-style))
-        var(--tt-cl-color, var(--tt-line-color)) !important;
+        var(--tt-cl-color, var(--tt-line-color));
 }
 
 table.tt-table :is(th, td).tt-cr {
-    border-right:
+    --tt-b-right:
         var(--tt-cr-width, var(--tt-line-width))
         var(--tt-cr-style, var(--tt-line-style))
-        var(--tt-cr-color, var(--tt-line-color)) !important;
+        var(--tt-cr-color, var(--tt-line-color));
 }
 
 /* A row's bottom border and the next row's top border are the SAME edge once
    borders collapse, and the winner is picked by the border-conflict rules —
    widest first, then style precedence, where solid beats dashed and dotted.
-   That resolution happens after the cascade, so `!important` above has no say
-   in it: a dashed row line at the table's own width simply loses to its
+   That resolution happens after the cascade, so no amount of specificity can
+   settle it: a dashed row line at the table's own width simply loses to its
    neighbour's ordinary grid line and never appears.
 
    Suppressing the competing side settles it — `none` loses every conflict, so
    the chosen edge is left to draw uncontested. The :not() guards keep an
    explicitly set edge on the neighbour from being suppressed by this, and the
    :has() rules do the same against the table's own perimeter border. */
-table.tt-table tr.tt-rb + tr:not(.tt-rt) > :is(th, td) {
-    border-top: 0 !important;
+table.tt-table tr.tt-rb + tr:not(.tt-rt) {
+    --tt-b-top: 0;
 }
 
-table.tt-table tr:has(+ tr.tt-rt):not(.tt-rb) > :is(th, td) {
-    border-bottom: 0 !important;
+table.tt-table tr:has(+ tr.tt-rt):not(.tt-rb) {
+    --tt-b-bottom: 0;
 }
 
 table.tt-table :is(th, td).tt-cr + :is(th, td):not(.tt-cl) {
-    border-left: 0 !important;
+    --tt-b-left: 0;
 }
 
 table.tt-table :is(th, td):has(+ :is(th, td).tt-cl):not(.tt-cr) {
-    border-right: 0 !important;
+    --tt-b-right: 0;
 }
 
 /* Same contest at the table's own edge, where the competitor is the table
-   element's border rather than a neighbouring cell. */
+   element's border rather than a neighbouring cell. These do set a border
+   directly, but only against the table's own — one class deeper than the
+   rule that put it there, so plain specificity is enough. */
 table.tt-table:has(tr:first-child.tt-rt) {
-    border-top: 0 !important;
+    border-top: 0;
 }
 
 table.tt-table:has(tr:last-child.tt-rb) {
-    border-bottom: 0 !important;
+    border-bottom: 0;
 }
 
 table.tt-table:has(:is(th, td):first-child.tt-cl) {
-    border-left: 0 !important;
+    border-left: 0;
 }
 
 table.tt-table:has(:is(th, td):last-child.tt-cr) {
-    border-right: 0 !important;
+    border-right: 0;
 }
 
 table.tt-table th {

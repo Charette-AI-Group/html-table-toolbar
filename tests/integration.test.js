@@ -75,13 +75,13 @@ test('toggling markers numbers every row and cell in the document', () => {
     assert.equal(p.settings.rowMarkers, true, 'the switch is global state');
     assert.deepEqual(ed.getValue().split('\n').slice(2, 12), [
         '<table class="tt-table" data-tt="1">',
-        '<tr><!-- r01 -->',
-        '<th><!-- c01 -->Task</th>',
-        '<th><!-- c02 -->Owner</th>',
+        '<tr>',
+        '<th><!-- r01c01 -->Task</th>',
+        '<th><!-- r01c02 -->Owner</th>',
         '</tr>',
-        '<tr><!-- r02 -->',
-        '<td><!-- c01 -->Design review</td>',
-        '<td><!-- c02 -->Alice</td>',
+        '<tr>',
+        '<td><!-- r02c01 -->Design review</td>',
+        '<td><!-- r02c02 -->Alice</td>',
         '</tr>',
         '</table>',
     ]);
@@ -111,9 +111,9 @@ test('the switch reaches every table in the note, not just the one at the cursor
     const p = makePlugin(ed);
 
     p.toggleMarkers();
-    assert.match(ed.getValue(), /<td><!-- c01 -->one<\/td>/);
-    assert.match(ed.getValue(), /<td><!-- c01 -->two<\/td>/);
-    assert.equal(ed.getValue().split('<tr><!-- r01 -->').length - 1, 2);
+    assert.match(ed.getValue(), /<td><!-- r01c01 -->one<\/td>/);
+    assert.match(ed.getValue(), /<td><!-- r01c01 -->two<\/td>/);
+    assert.equal(ed.getValue().split('<!-- r01c01 -->').length - 1, 2);
 
     p.toggleMarkers();
     assert.equal(ed.getValue(), two, 'and strips them all again');
@@ -133,8 +133,7 @@ test('an existing table conforms to the switch on the next operation', () => {
     // markers already on globally, but this table has none yet
     const p = makePlugin(ed, { rowMarkers: true });
     p.runOp((m, l) => plugin.__internals.insertRow(m, l.row + 1));
-    assert.match(ed.getValue(), /<tr><!-- r01 -->/);
-    assert.match(ed.getValue(), /<td><!-- c01 -->Design review<\/td>/);
+    assert.match(ed.getValue(), /<td><!-- r02c01 -->Design review<\/td>/);
 });
 
 test('an operation strips markers from a table when the switch is off', () => {
@@ -165,7 +164,13 @@ test('markers survive a structural edit and renumber', () => {
     p.runOp((m, l) => plugin.__internals.insertRow(m, l.row + 1));
 
     const trs = ed.getValue().split('\n').filter((l) => l.startsWith('<tr'));
-    assert.deepEqual(trs, ['<tr><!-- r01 -->', '<tr><!-- r02 -->', '<tr><!-- r03 -->']);
+    assert.deepEqual(trs, ['<tr>', '<tr>', '<tr>'], 'nothing lands on the <tr> lines');
+    const firstCells = ed.getValue().split('\n').filter((l) => /^<t[dh]/.test(l)).filter((_, i) => i % 2 === 0);
+    assert.deepEqual(firstCells, [
+        '<th><!-- r01c01 -->Task</th>',
+        '<td><!-- r02c01 -->Design review</td>',
+        '<td><!-- r03c01 --></td>',
+    ]);
 });
 
 test('column markers renumber when a column is inserted', () => {
@@ -176,9 +181,9 @@ test('column markers renumber when a column is inserted', () => {
 
     const header = ed.getValue().split('\n').filter((l) => l.startsWith('<th'));
     assert.deepEqual(header, [
-        '<th><!-- c01 -->Task</th>',
-        '<th><!-- c02 --></th>',
-        '<th><!-- c03 -->Owner</th>',
+        '<th><!-- r01c01 -->Task</th>',
+        '<th><!-- r01c02 --></th>',
+        '<th><!-- r01c03 -->Owner</th>',
     ]);
 });
 
@@ -257,8 +262,7 @@ test('a table still inserts normally outside a table', () => {
 test('inserting a table honours the row-marker setting', () => {
     const ed = new MockEditor('\n', { line: 0, ch: 0 });
     makePlugin(ed, { rowMarkers: true }).insertTable(2, 2, true);
-    assert.match(ed.getValue(), /<tr><!-- r01 -->/);
-    assert.match(ed.getValue(), /<th><!-- c01 --><\/th>/);
+    assert.match(ed.getValue(), /<th><!-- r01c01 --><\/th>/);
 
     const ed2 = new MockEditor('\n', { line: 0, ch: 0 });
     makePlugin(ed2, { rowMarkers: false }).insertTable(2, 2, true);
@@ -269,14 +273,15 @@ test('operations still work with the cursor on a marked <tr> line', () => {
     const ed = new MockEditor(SAMPLE, IN_CELL);
     const p = makePlugin(ed);
     p.toggleMarkers();
-    // put the cursor on the second row's <tr><!-- r02 --> line
-    const trLine = ed.getValue().split('\n').findIndex((l) => l.startsWith('<tr><!-- r02'));
+    // put the cursor on the second row's <tr> line
+    const lines = ed.getValue().split('\n');
+    const trLine = lines.findIndex((l, i) => l === '<tr>' && /r02c01/.test(lines[i + 1] || ''));
     ed.setCursor({ line: trLine, ch: 0 });
     p.runOp((m, l) => plugin.__internals.deleteRow(m, l.row));
 
     const out = ed.getValue();
     assert.equal(out.includes('Design review'), false, 'row 2 was the one deleted');
-    assert.match(out, /<tr><!-- r01 -->/);
+    assert.match(out, /<th><!-- r01c01 -->Task<\/th>/);
     assert.equal(out.split('\n').filter((l) => l.startsWith('<tr')).length, 1);
 });
 

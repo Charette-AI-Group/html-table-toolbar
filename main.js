@@ -76,9 +76,14 @@ const RE_COL = /^[ \t]*<col\b([^>]*?)\/?>[ \t]*$/i;
 // Row markers ride on the <tr> line so they cost no extra lines, and the
 // legend names the columns once at the top. Both are regenerated wholesale on
 // every serialize and never patched, so they cannot drift out of step.
+// The trailing comment is no longer written — it is only still accepted so
+// that tables marked by an earlier version keep parsing, and lose it on the
+// next write.
 const RE_TR_OPEN = /^[ \t]*<tr\b([^>]*)>(?:\s*<!--([\s\S]*?)-->)?[ \t]*$/i;
-// A column marker sits just inside the cell, ahead of its content.
-const RE_CELL_MARKER = /^<!--\s*c[\d-]+\s*-->/i;
+// A marker sits just inside the cell, ahead of its content. The bare `c01`
+// form is what earlier versions wrote alongside a marker on the <tr>; still
+// read so those tables keep working, and replaced on the next write.
+const RE_CELL_MARKER = /^<!--\s*(?:r[\d-]+)?c[\d-]+\s*-->/i;
 // Recognised but never written: the standalone legend line earlier versions
 // emitted. Parsing keeps working on those tables, and the first edit drops it.
 const RE_LEGEND = /^[ \t]*<!--\s*cols:[\s\S]*?-->[ \t]*$/i;
@@ -309,20 +314,25 @@ function parseTable(lines) {
     return model.rows.length ? model : null;
 }
 
-function rowMarker(r, total) {
-    const width = Math.max(2, String(total).length);
-    return '<!-- r' + String(r + 1).padStart(width, '0') + ' -->';
-}
-
-// Numbered by GRID column, not by position in the row, so the number stays
-// true underneath a colspan: in a row sitting below a two-wide header the
-// markers read c01, c03 — the gap is the point. A spanning cell states its
-// own range rather than just where it starts.
-function colMarker(col, colspan, total) {
-    const width = Math.max(2, String(total).length);
-    const pad = (n) => String(n).padStart(width, '0');
-    const body = colspan > 1 ? pad(col + 1) + '-' + pad(col + colspan) : pad(col + 1);
-    return '<!-- c' + body + ' -->';
+// One coordinate per cell, and nothing on the <tr> line at all. A comment
+// sitting after <tr> reads like a labelled field with room after it, which
+// invites typing there — and text on a <tr> line is exactly what the fast
+// parser cannot read.
+//
+// Columns are numbered by GRID position, not by order within the row, so the
+// number stays true underneath a colspan: in a row below a two-wide header the
+// markers read c01 then c03, and the gap is the point. A cell that spans states
+// its range on whichever axis it spans.
+function cellMarker(r, col, rowspan, colspan, rowTotal, colTotal) {
+    const pad = (n, w) => String(n).padStart(w, '0');
+    const axis = (start, count, w) => (count > 1
+        ? pad(start + 1, w) + '-' + pad(start + count, w)
+        : pad(start + 1, w));
+    return '<!-- r'
+        + axis(r, rowspan, Math.max(2, String(rowTotal).length))
+        + 'c'
+        + axis(col, colspan, Math.max(2, String(colTotal).length))
+        + ' -->';
 }
 
 function serializeTable(model) {
@@ -336,11 +346,17 @@ function serializeTable(model) {
     // nothing for it.
     const info = model.markers ? gridInfo(model) : null;
     model.rows.forEach((row, r) => {
-        const open = '<tr' + attrsToString(row.attrs) + '>';
-        out.push(model.markers ? open + rowMarker(r, model.rows.length) : open);
+        out.push('<tr' + attrsToString(row.attrs) + '>');
         row.cells.forEach((cell, ci) => {
             const mark = info
-                ? colMarker(info.start.get(r + ':' + ci), spanOf(cell, 'colspan'), info.cols)
+                ? cellMarker(
+                    r,
+                    info.start.get(r + ':' + ci),
+                    Math.min(spanOf(cell, 'rowspan'), model.rows.length - r),
+                    spanOf(cell, 'colspan'),
+                    model.rows.length,
+                    info.cols
+                )
                 : '';
             out.push('<' + cell.tag + attrsToString(cell.attrs) + '>' + mark + cell.content + '</' + cell.tag + '>');
         });
@@ -388,6 +404,34 @@ function cellAtLine(model, off) {
         n += 2 + count;
     }
     return { row: -1, cell: -1 };
+}
+
+// Name the first line the fast parser cannot read, and why. Without this the
+// failure is invisible: the toolbar dims to look exactly as it does when the
+// cursor is outside a table, so nothing tells you that a stray character on a
+// <tr> line is the reason. Messages are short enough for the status bar.
+function diagnose(lines, base) {
+    const at = (i, why) => ({ line: base + i, why });
+    if (!lines.length || !RE_TABLE_OPEN.test(lines[0])) return at(0, 'the <table> tag needs a line to itself');
+
+    const last = lines.length - 1;
+    for (let i = 1; i < last; i++) {
+        const l = lines[i];
+        if (!l.trim()) return at(i, 'a blank line ends the table');
+        if (/^[ \t]*<tr\b/i.test(l) && !RE_TR_OPEN.test(l)) {
+            return at(i, 'text on the <tr> line — cell text belongs between <td> and </td>');
+        }
+        if (/^[ \t]*<\/tr>/i.test(l) && !RE_TR_CLOSE.test(l)) return at(i, 'text after </tr>');
+        if (/<\/(?:td|th)>[\s\S]*<(?:td|th)\b/i.test(l)) return at(i, 'two cells share this line');
+        if (/^[ \t]*<(?:td|th)\b/i.test(l) && !RE_CELL.test(l)) {
+            return at(i, 'this cell does not open and close on its own line');
+        }
+        if (!/^[ \t]*<(?:tr\b|\/tr>|td\b|th\b|col\b|colgroup\b|\/colgroup>|!--)/i.test(l)) {
+            return at(i, 'text outside a cell — it belongs between <td> and </td>');
+        }
+    }
+    if (!RE_TABLE_CLOSE.test(lines[last])) return at(last, 'the </table> tag needs a line to itself');
+    return null;
 }
 
 // Which cell an end of a mouse selection refers to. Endpoints routinely miss
@@ -1414,9 +1458,26 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
     updateContext() {
         const ed = this.getEditor();
         const loc = ed ? this.locate(ed, false) : null;
-        const inTable = !!loc;
 
-        if (this.statusEl) this.statusEl.setText(inTable ? this.describePosition(loc) : '');
+        // Being inside a table the parser cannot read is a third state, and it
+        // used to be indistinguishable from being outside one. The buttons
+        // repair the table before acting, so the strip stays live here — it is
+        // only the explanation that was missing.
+        let problem = null;
+        if (!loc && ed) {
+            const block = this.findTableBlock(ed, ed.getCursor('from').line);
+            if (block) problem = diagnose(this.blockText(ed, block), block.start);
+        }
+        const inTable = !!loc || !!problem;
+
+        if (this.statusEl) {
+            this.statusEl.setText(
+                loc ? this.describePosition(loc)
+                    : problem ? 'Table: line ' + (problem.line + 1) + ' — ' + problem.why
+                        : ''
+            );
+            this.statusEl.toggleClass('tt-status-warn', !!problem);
+        }
         if (this.markerBtn) this.markerBtn.classList.toggle('tt-on', !!this.settings.rowMarkers);
 
         if (!this.toolbar) return;
@@ -1924,9 +1985,9 @@ module.exports.__internals = {
     setTableBorder, currentBorder, setStyleProp, getStyleProp, setExclusiveClass,
     setRowBorder, rowEdges, rowLineFormat, setColumnBorder, columnEdges, columnLineFormat,
     setCellBackground, buildTableLines, stampMarker, parseAttrs, attrsToString,
-    getAttr, setAttr, getClasses, canonicalize, rowMarker, colMarker,
+    getAttr, setAttr, getClasses, canonicalize, cellMarker,
     parseColor, toRgba, sameColor, isColorish, isLengthish, DEFAULT_CELL_SHADES,
-    resolveEndpoint,
+    resolveEndpoint, diagnose,
 };
 
 // ---------------------------------------------------------------------------
@@ -2510,7 +2571,7 @@ class HtmlTableToolbarSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Row and column markers')
-            .setDesc('Label every row and cell with its coordinates in an HTML comment, so you can tell where you are deep inside a long table. Visible in Source mode only — they render as nothing. This is one switch for all tables: turning it on marks every table in the note you have open, and any table the plugin edits afterwards; turning it off strips them again. The ⋯ menu has the same switch with a tick. Markers are rebuilt from scratch on every edit, so they cannot go stale.')
+            .setDesc('Label every cell with its coordinates — r02c01 — in an HTML comment, so you can tell where you are deep inside a long table. Nothing is written on the <tr> lines, which must stay empty. Visible in Source mode only; they render as nothing. This is one switch for all tables: turning it on marks every table in the note you have open, and any table the plugin edits afterwards; turning it off strips them again. The ⋯ menu has the same switch with a tick. Markers are rebuilt from scratch on every edit, so they cannot go stale.')
             .addToggle((t) => t
                 .setValue(this.plugin.settings.rowMarkers)
                 .onChange((v) => this.plugin.setMarkers(v, false)));

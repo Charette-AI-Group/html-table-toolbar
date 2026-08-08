@@ -187,6 +187,54 @@ test('every command runs without throwing, in and out of a table', () => {
     assert.deepEqual(failures, []);
 });
 
+// A table broken by a stray character used to look exactly like being outside
+// one: strip dimmed, status bar blank, no clue what was wrong.
+const BROKEN = TABLE.replace('<tr>\n<td>Design review', '<tr>oops\n<td>Design review');
+
+function contextFor(text, cursor) {
+    const ed = new MockEditor(text, cursor);
+    const p = makePlugin(ed);
+    delete p.updateContext; // exercise the real one
+    p.buildToolbar();
+    p.statusEl = new (require('./mocks/dom.js').FakeEl)('div');
+    p.updateContext();
+    return {
+        status: p.statusEl.text,
+        warn: p.statusEl.classes.has('tt-status-warn'),
+        dimmed: p.toolbar.classes.has('tt-inactive'),
+    };
+}
+
+test('a table broken by stray text keeps the strip live and says what is wrong', () => {
+    const restore = installDom();
+    try {
+        const r = contextFor(BROKEN, { line: 8, ch: 4 });
+        assert.equal(r.dimmed, false, 'the strip stays live — the buttons repair before acting');
+        assert.match(r.status, /^Table: line 8 —/, 'names the offending line in the note');
+        assert.match(r.status, /text on the <tr> line/);
+        assert.equal(r.warn, true, 'and reads as a warning, not a position');
+    } finally {
+        restore();
+    }
+});
+
+test('a readable table still reports position, and outside one reports nothing', () => {
+    const restore = installDom();
+    try {
+        const inside = contextFor(TABLE, IN_CELL);
+        assert.match(inside.status, /^R2 · C1/);
+        assert.equal(inside.warn, false);
+        assert.equal(inside.dimmed, false);
+
+        const outside = contextFor(TABLE, { line: 0, ch: 3 });
+        assert.equal(outside.status, '');
+        assert.equal(outside.warn, false);
+        assert.equal(outside.dimmed, true, 'genuinely outside a table still dims');
+    } finally {
+        restore();
+    }
+});
+
 // Catch whichever modal a click opens, so dialogs can be driven from the
 // outside without widening the plugin's exports just for tests.
 function captureModals(fn) {

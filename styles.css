@@ -203,6 +203,12 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* The readout doubles as the only warning that a table cannot be parsed, so it
+   has to look different from an ordinary R/C position. */
+.tt-status.tt-status-warn {
+    color: var(--text-warning, var(--text-accent));
+}
+
 /* ==========================================================================
    Insert-table grid picker
    ========================================================================== */

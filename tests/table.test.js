@@ -22,7 +22,7 @@ const {
     toggleHeaderRow, setCellAlign, setColumnAlign, setTableAlign, setColumnWidth,
     setTableBorder, currentBorder, setStyleProp, getStyleProp,
     setRowBorder, rowEdges, rowLineFormat, setColumnBorder, columnEdges, columnLineFormat,
-    buildTableLines, stampMarker, parseAttrs, attrsToString, getAttr, colMarker,
+    buildTableLines, stampMarker, parseAttrs, attrsToString, getAttr, cellMarker, diagnose,
     parseColor, toRgba, sameColor, isColorish, isLengthish, DEFAULT_CELL_SHADES,
 } = plugin.__internals;
 
@@ -446,6 +446,40 @@ test('borders coexist with table alignment on the same element', () => {
     assert.match(open, /--tt-line-style:dashed/);
 });
 
+// --- diagnosing an unreadable table ------------------------------------------
+
+test('diagnose names the line and the reason for each way of breaking a table', () => {
+    const cases = [
+        [['<table>', '<tr>hello', '<td>a</td>', '</tr>', '</table>'], 1, /text on the <tr> line/],
+        [['<table>', '<tr>', 'hello', '<td>a</td>', '</tr>', '</table>'], 2, /text outside a cell/],
+        [['<table>', '<tr>', '<td>a</td>', '</tr>bye', '</table>'], 3, /text after <\/tr>/],
+        [['<table>', '<tr>', '<td>a</td><td>b</td>', '</tr>', '</table>'], 2, /two cells share this line/],
+        [['<table>', '<tr>', '', '<td>a</td>', '</tr>', '</table>'], 2, /blank line ends the table/],
+        [['<table>', '<tr>', '<td>a', '</tr>', '</table>'], 2, /own line/],
+    ];
+    for (const [lines, offset, pattern] of cases) {
+        assert.equal(parseTable(lines), null, 'fixture should not parse: ' + lines[offset]);
+        const d = diagnose(lines, 0);
+        assert.ok(d, 'expected a diagnosis for: ' + lines[offset]);
+        assert.equal(d.line, offset, 'wrong line for: ' + lines[offset]);
+        assert.match(d.why, pattern);
+    }
+});
+
+test('diagnose reports nothing for a table that parses', () => {
+    assert.equal(diagnose(table(['!a|!b', 'c|d']), 0), null);
+    assert.equal(diagnose(table(['a|b'], { cols: ['40%', ''] }), 0), null);
+    const marked = parsed(['a|b']);
+    marked.markers = true;
+    assert.equal(diagnose(serializeTable(marked), 0), null, 'markers are not mistaken for stray text');
+});
+
+test('diagnose offsets the line number by where the table starts', () => {
+    const lines = ['<table>', '<tr>oops', '<td>a</td>', '</tr>', '</table>'];
+    assert.equal(diagnose(lines, 0).line, 1);
+    assert.equal(diagnose(lines, 40).line, 41, 'reported against the note, not the block');
+});
+
 // --- row and column edges ---------------------------------------------------
 
 test('a row border marks the <tr> and nothing else', () => {
@@ -633,13 +667,13 @@ test('new tables are canonical, marked, and parse back', () => {
 test('parses a marked table and round-trips it', () => {
     const lines = [
         '<table class="tt-table" data-tt="1">',
-        '<tr><!-- r01 -->',
-        '<th><!-- c01 -->Task</th>',
-        '<th><!-- c02 -->Owner</th>',
+        '<tr>',
+        '<th><!-- r01c01 -->Task</th>',
+        '<th><!-- r01c02 -->Owner</th>',
         '</tr>',
-        '<tr><!-- r02 -->',
-        '<td><!-- c01 -->Design review</td>',
-        '<td><!-- c02 -->Alice</td>',
+        '<tr>',
+        '<td><!-- r02c01 -->Design review</td>',
+        '<td><!-- r02c02 -->Alice</td>',
         '</tr>',
         '</table>',
     ];
@@ -651,13 +685,20 @@ test('parses a marked table and round-trips it', () => {
     assert.deepEqual(serializeTable(model), lines);
 });
 
-test('a marker on any row or cell is enough to keep a table marked', () => {
-    const byRow = parseTable(['<table>', '<tr><!-- r01 -->', '<td>a</td>', '</tr>', '</table>']);
-    assert.equal(byRow.markers, true);
-    assert.deepEqual(serializeTable(byRow).slice(1, 3), ['<tr><!-- r01 -->', '<td><!-- c01 -->a</td>']);
+test('nothing is ever written on the <tr> line', () => {
+    const model = parsed(['a|b', 'c|d']);
+    model.markers = true;
+    assert.deepEqual(serializeTable(model).filter((l) => l.startsWith('<tr')), ['<tr>', '<tr>']);
+});
 
-    const byCell = parseTable(['<table>', '<tr>', '<td><!-- c01 -->a</td>', '</tr>', '</table>']);
-    assert.equal(byCell.markers, true);
+test('markers written by the earlier format are read, then replaced', () => {
+    // a marker on the <tr> plus a bare column marker on the cell
+    const old = parseTable([
+        '<table>', '<tr><!-- r01 -->', '<td><!-- c01 -->a</td>', '</tr>', '</table>',
+    ]);
+    assert.equal(old.markers, true);
+    assert.equal(old.rows[0].cells[0].content, 'a', 'the old marker is stripped, not kept as text');
+    assert.deepEqual(serializeTable(old).slice(1, 3), ['<tr>', '<td><!-- r01c01 -->a</td>']);
 });
 
 test('an old legend line still parses and is dropped on the next write', () => {
@@ -675,7 +716,8 @@ test('an old legend line still parses and is dropped on the next write', () => {
     assert.equal(model.sourceLegend, true);
     const out = serializeTable(model);
     assert.equal(out.some((l) => l.includes('cols:')), false, 'legend is not written back');
-    assert.equal(out[1], '<tr><!-- r01 -->');
+    assert.equal(out[1], '<tr>');
+    assert.equal(out[2], '<td><!-- r01c01 -->Task</td>');
     // the legend still occupies a line in the SOURCE, so cursor mapping must
     // account for it while the new output must not
     assert.deepEqual(cellAtLine(model, 3), { row: 0, cell: 0 });
@@ -693,8 +735,12 @@ test('markers are renumbered wholesale after a structural edit', () => {
     model.markers = true;
     deleteRow(model, 1);
     insertRow(model, 1);
-    const trs = serializeTable(model).filter((l) => l.startsWith('<tr'));
-    assert.deepEqual(trs, ['<tr><!-- r01 -->', '<tr><!-- r02 -->', '<tr><!-- r03 -->']);
+    const first = serializeTable(model).filter((l) => /^<t[dh]/.test(l)).filter((_, i) => i % 2 === 0);
+    assert.deepEqual(first, [
+        '<th><!-- r01c01 -->a</th>',
+        '<td><!-- r02c01 --></td>',
+        '<td><!-- r03c01 -->e</td>',
+    ]);
 });
 
 test('marker width grows past ninety-nine rows', () => {
@@ -702,22 +748,22 @@ test('marker width grows past ninety-nine rows', () => {
     for (let i = 0; i < 100; i++) rows.push('a|b');
     const model = parsed(rows);
     model.markers = true;
-    const trs = serializeTable(model).filter((l) => l.startsWith('<tr'));
-    assert.equal(trs[0], '<tr><!-- r001 -->');
-    assert.equal(trs[99], '<tr><!-- r100 -->');
+    const cells = serializeTable(model).filter((l) => /^<t[dh]/.test(l));
+    assert.equal(cells[0], '<td><!-- r001c01 -->a</td>', 'rows widen, columns do not');
+    assert.equal(cells[198], '<td><!-- r100c01 -->a</td>');
 });
 
-test('every cell states its own column', () => {
+test('every cell states its own row and column', () => {
     const model = parsed(['!Task|!Owner|!Notes', 'a|b|c']);
     model.markers = true;
     const cells = serializeTable(model).filter((l) => /^<t[dh]/.test(l));
     assert.deepEqual(cells, [
-        '<th><!-- c01 -->Task</th>',
-        '<th><!-- c02 -->Owner</th>',
-        '<th><!-- c03 -->Notes</th>',
-        '<td><!-- c01 -->a</td>',
-        '<td><!-- c02 -->b</td>',
-        '<td><!-- c03 -->c</td>',
+        '<th><!-- r01c01 -->Task</th>',
+        '<th><!-- r01c02 -->Owner</th>',
+        '<th><!-- r01c03 -->Notes</th>',
+        '<td><!-- r02c01 -->a</td>',
+        '<td><!-- r02c02 -->b</td>',
+        '<td><!-- r02c03 -->c</td>',
     ]);
 });
 
@@ -726,30 +772,32 @@ test('a spanning cell states its range and the row below keeps true numbers', ()
     model.markers = true;
     const cells = serializeTable(model).filter((l) => /^<t[dh]/.test(l));
     assert.deepEqual(cells, [
-        '<td colspan="2"><!-- c01-02 -->Wide</td>',
-        '<td><!-- c03 -->Tail</td>',
-        '<td><!-- c01 -->a</td>',
-        '<td><!-- c02 -->b</td>',
-        '<td><!-- c03 -->c</td>',
+        '<td colspan="2"><!-- r01c01-02 -->Wide</td>',
+        '<td><!-- r01c03 -->Tail</td>',
+        '<td><!-- r02c01 -->a</td>',
+        '<td><!-- r02c02 -->b</td>',
+        '<td><!-- r02c03 -->c</td>',
     ]);
 });
 
-test('a rowspan does not shift the numbering of the row beneath it', () => {
-    // the tall cell holds column 1, so the next row's own cell is column 2
+test('a cell spanning rows states that range too', () => {
+    // the tall cell holds column 1 across both rows, so the next row's own
+    // cell is column 2 — the gap is the point
     const model = parsed(['Tall@2x1|b', 'c']);
     model.markers = true;
     const cells = serializeTable(model).filter((l) => /^<t[dh]/.test(l));
     assert.deepEqual(cells, [
-        '<td rowspan="2"><!-- c01 -->Tall</td>',
-        '<td><!-- c02 -->b</td>',
-        '<td><!-- c02 -->c</td>',
+        '<td rowspan="2"><!-- r01-02c01 -->Tall</td>',
+        '<td><!-- r01c02 -->b</td>',
+        '<td><!-- r02c02 -->c</td>',
     ]);
 });
 
-test('marker width follows the count, independently for rows and columns', () => {
-    assert.equal(colMarker(0, 1, 9), '<!-- c01 -->');
-    assert.equal(colMarker(9, 1, 100), '<!-- c010 -->');
-    assert.equal(colMarker(0, 3, 9), '<!-- c01-03 -->');
+test('marker width follows the count, independently on each axis', () => {
+    assert.equal(cellMarker(0, 0, 1, 1, 9, 9), '<!-- r01c01 -->');
+    assert.equal(cellMarker(9, 9, 1, 1, 100, 100), '<!-- r010c010 -->');
+    assert.equal(cellMarker(1, 0, 1, 3, 5, 9), '<!-- r02c01-03 -->');
+    assert.equal(cellMarker(0, 2, 2, 2, 5, 9), '<!-- r01-02c03-04 -->');
 });
 
 test('markers never shift the line arithmetic', () => {
@@ -769,28 +817,28 @@ test('markers and a colgroup coexist', () => {
     model.markers = true;
     const lines = serializeTable(model);
     assert.equal(lines[1], '<colgroup>');
-    assert.equal(lines[5], '<tr><!-- r01 -->');
-    assert.equal(lines[6], '<td><!-- c01 -->a</td>');
+    assert.equal(lines[5], '<tr>');
+    assert.equal(lines[6], '<td><!-- r01c01 -->a</td>');
     assert.deepEqual(cellAtLine(model, lineOfCell(model, 0, 1)), { row: 0, cell: 1 });
 });
 
 test('markers do not leak into merged content', () => {
     const lines = [
-        '<table>', '<tr><!-- r01 -->',
-        '<td><!-- c01 -->a</td>', '<td><!-- c02 -->b</td>',
+        '<table>', '<tr>',
+        '<td><!-- r01c01 -->a</td>', '<td><!-- r01c02 -->b</td>',
         '</tr>', '</table>',
     ];
     const model = parseTable(lines);
     mergeCells(model, 0, 0, 0, 1);
     assert.equal(model.rows[0].cells[0].content, 'a<br>b');
-    assert.equal(serializeTable(model)[2], '<td colspan="2"><!-- c01-02 -->a<br>b</td>');
+    assert.equal(serializeTable(model)[2], '<td colspan="2"><!-- r01c01-02 -->a<br>b</td>');
 });
 
-test('new tables follow the row-marker preference', () => {
+test('new tables follow the marker preference', () => {
     assert.equal(buildTableLines(2, 2, true, false).some((l) => l.includes('<!--')), false);
     const marked = buildTableLines(2, 2, true, true);
-    assert.equal(marked[1], '<tr><!-- r01 -->');
-    assert.equal(marked[2], '<th><!-- c01 --></th>');
+    assert.equal(marked[1], '<tr>');
+    assert.equal(marked[2], '<th><!-- r01c01 --></th>');
     assert.ok(parseTable(marked), 'still canonical');
 });
 

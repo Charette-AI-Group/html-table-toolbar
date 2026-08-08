@@ -84,6 +84,9 @@ This is not cosmetic. Because each cell owns a line, the line number *is* the ce
 
 - **No blank lines inside the table.** Under CommonMark a blank line ends an HTML block, so a gap between rows would terminate the table and dump the rest as literal text. Cells that need internal breaks use `<br>` and stay on one line.
 - **One cell per line.** Two cells sharing a line is rejected by the fast parser rather than tolerated.
+- **All text lives between `<td>` and `</td>`.** A `<tr>` line holds nothing but the tag, and neither does `</tr>`. Typing on one of those lines — or on a line of its own between cells — makes the table unreadable to the fast parser.
+
+That last one is the easy mistake to make, so the plugin tells you when it happens: the status bar names the line and the reason, for example `Table: line 8 — text on the <tr> line`. The toolbar stays live, because every button repairs the table before acting — pressing any of them, or **Reformat table**, puts it right.
 
 Formatting rides on classes defined in `styles.css` (`tt-c` to centre a cell, `tt-center` to centre the table) rather than inline styles, so cell lines stay short and the content stays visually dominant when you hand-edit.
 
@@ -118,29 +121,31 @@ All of this depends on `border-collapse: collapse`, where adjacent cells share o
 
 ### Row and column markers (optional, off by default)
 
-Long tables are hard to navigate in source: forty rows down, the header has scrolled away and nothing tells you which column a given `<td>` belongs to. Turning markers on labels every row and every cell with its coordinates:
+Long tables are hard to navigate in source: forty rows down, the header has scrolled away and nothing tells you which column a given `<td>` belongs to. Turning markers on labels every cell with its coordinates:
 
 ```html
-<tr><!-- r02 -->
-<td><!-- c01 -->Design review</td>
-<td><!-- c02 -->Alice</td>
-<td><!-- c03 -->Blocked on the API spec</td>
+<tr>
+<td><!-- r02c01 -->Design review</td>
+<td><!-- r02c02 -->Alice</td>
+<td><!-- r02c03 -->Blocked on the API spec</td>
 </tr>
 ```
 
+**Nothing is written on the `<tr>` line.** A comment there would read like a labelled field with room after it — and text on a `<tr>` line is precisely what makes a table unreadable. Each cell carries its full coordinate instead, so there is nothing to cross-reference between lines either.
+
 Markers ride on lines that exist anyway, so the table never grows a line and the line-as-address arithmetic is untouched.
 
-Numbering is by **grid** column, not by position in the row, so it stays true under merged cells. A spanning cell states its range, and the row beneath it keeps the real numbers:
+Numbering is by **grid** column, not by position in the row, so it stays true under merged cells. A cell that spans states its range on whichever axis it spans, and its neighbours keep the real numbers:
 
 ```html
-<tr><!-- r01 -->
-<td colspan="2"><!-- c01-02 -->Wide</td>
-<td><!-- c03 -->Tail</td>
+<tr>
+<td colspan="2"><!-- r01c01-02 -->Wide</td>
+<td><!-- r01c03 -->Tail</td>
 </tr>
-<tr><!-- r02 -->
-<td><!-- c01 -->a</td>
-<td><!-- c02 -->b</td>
-<td><!-- c03 -->c</td>
+<tr>
+<td><!-- r02c01 -->a</td>
+<td><!-- r02c02 -->b</td>
+<td><!-- r02c03 -->c</td>
 </tr>
 ```
 

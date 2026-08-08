@@ -1,0 +1,690 @@
+/* ==========================================================================
+   Toolbar chrome
+   `bottom` is set from JS so the strip can stack above the sibling font
+   toolbar when that plugin is installed.
+   ========================================================================== */
+
+.tt-toolbar {
+    /* How much darker the bar goes when it is inactive. Set from the plugin
+       settings; override in a CSS snippet if you want a different feel.
+       Icons fade toward the panel by the same knob, so the strip recedes as
+       one piece. Text needs a bigger push than a background to read as
+       inactive, hence the multiplier; the cap stops a high setting from
+       fading icons out completely. */
+    --tt-dim: 14%;
+    /* Width the expanded strip wraps at. The full set runs ~970px in a single
+       row; two rows need at least ~588px, since below that the first row
+       cannot hold five groups and the trailing ⋯/× is pushed onto a third.
+       The margin above that is headroom for themes whose UI font makes the
+       group labels wider than the default. */
+    --tt-expanded-width: 680px;
+    --tt-fade: min(calc(var(--tt-dim) * 3), 70%);
+    --tt-faded: color-mix(in srgb, var(--text-normal), var(--background-secondary) var(--tt-fade));
+    position: fixed;
+    bottom: 44px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 3px;
+    /* Fixed height so nothing below shifts when the strip appears */
+    height: 32px;
+    box-sizing: border-box;
+    max-width: 92vw;
+    overflow-x: auto;
+    padding: 3px 8px;
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.25));
+    z-index: 51;
+}
+
+.tt-toolbar.tt-hidden {
+    display: none;
+}
+
+/* ---- Expanded: this strip has the bottom of the window to itself ----------
+   The extra controls are always in the DOM and revealed by class, so moving
+   between compact and expanded is a repaint, never a rebuild. */
+
+/* Scoped to .tt-toolbar deliberately: a bare .tt-extra ties on specificity
+   with .tt-group's own `display: flex` and loses on source order, which
+   leaves the promoted groups showing in compact mode. */
+.tt-toolbar .tt-extra {
+    display: none;
+}
+
+.tt-toolbar.tt-expanded .tt-group.tt-extra,
+.tt-toolbar.tt-expanded .tt-btn.tt-extra {
+    display: flex;
+}
+
+.tt-toolbar.tt-expanded .tt-label.tt-extra {
+    display: inline;
+}
+
+/* The overflow button is the compact layout's only door to the commands that
+   have real buttons once there is room for them. */
+.tt-toolbar.tt-expanded .tt-compact-only {
+    display: none;
+}
+
+/* Alone, take the font toolbar's shape: wrap onto a second row rather than
+   running wider than the bar it stands in for. Capping the width is what
+   forces the wrap — without it the extra controls would just extend the
+   single row. Override --tt-expanded-width in a snippet to taste. */
+.tt-toolbar.tt-expanded {
+    flex-wrap: wrap;
+    height: auto;
+    max-width: min(92vw, var(--tt-expanded-width));
+    overflow: visible;
+    padding: 6px 10px;
+    gap: 3px;
+    row-gap: 4px;
+}
+
+.tt-toolbar.tt-expanded .tt-group {
+    gap: 3px;
+}
+
+.tt-toolbar.tt-expanded .tt-btn {
+    width: 26px;
+    height: 26px;
+    font-size: 14px;
+}
+
+.tt-toolbar.tt-expanded .tt-btn .svg-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* Cursor is outside any table: the structural buttons will only scold you, so
+   dim the strip rather than hide it (hiding is the contextual setting).
+   This is a solid darker panel, not opacity — opacity composites against
+   whatever happens to be behind the bar, which on a light or busy background
+   left it close to unreadable. Muted text carries the "inactive" reading in
+   light themes, where a darker panel alone would read as more prominent. */
+.tt-toolbar.tt-inactive {
+    background: color-mix(in srgb, var(--background-secondary), #000 var(--tt-dim));
+    border-color: color-mix(in srgb, var(--background-modifier-border), #000 var(--tt-dim));
+}
+
+.tt-toolbar.tt-inactive .tt-group:not(:last-child)::after {
+    background: color-mix(in srgb, var(--background-modifier-border), #000 var(--tt-dim));
+}
+
+.tt-toolbar.tt-inactive .tt-label {
+    color: color-mix(in srgb, var(--text-muted), var(--background-secondary) var(--tt-fade));
+}
+
+/* Outside a table every structural control is inert, so it fades with the
+   panel. */
+.tt-toolbar.tt-inactive .tt-btn {
+    color: var(--tt-faded);
+}
+
+/* Except these: the overflow menu and the hide button work with the cursor
+   anywhere, and so does inserting a table. */
+.tt-toolbar.tt-inactive .tt-btn.tt-always,
+.tt-toolbar.tt-inactive .tt-btn.tt-outside-only {
+    color: var(--text-normal);
+}
+
+/* And the mirror image: inside a table, starting another one is the single
+   thing that cannot work — this format has no way to nest them. */
+.tt-toolbar:not(.tt-inactive) .tt-btn.tt-outside-only {
+    color: var(--tt-faded);
+}
+
+.tt-group {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 2px;
+}
+
+.tt-group:not(:last-child)::after {
+    content: '';
+    width: 1px;
+    height: 18px;
+    background: var(--background-modifier-border);
+    margin: 0 4px;
+}
+
+.tt-label {
+    font-size: 10px;
+    line-height: 1;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: 1px;
+    user-select: none;
+}
+
+.tt-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--text-normal);
+    box-shadow: none;
+}
+
+.tt-btn:hover {
+    background: var(--background-modifier-hover);
+    border-color: var(--background-modifier-border);
+}
+
+/* A mode that is currently on, shown pressed. Wins over the inactive fade
+   because the modes it marks work with the cursor anywhere. */
+.tt-toolbar .tt-btn.tt-on,
+.tt-toolbar.tt-inactive .tt-btn.tt-on {
+    background: var(--background-modifier-hover);
+    border-color: var(--background-modifier-border);
+    color: var(--text-accent, var(--text-normal));
+}
+
+.tt-btn .svg-icon {
+    width: 15px;
+    height: 15px;
+}
+
+.tt-status {
+    font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   Insert-table grid picker
+   ========================================================================== */
+
+.tt-grid-readout {
+    margin-bottom: 8px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.tt-grid-row {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 2px;
+}
+
+.tt-grid-cell {
+    width: 18px;
+    height: 18px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 2px;
+    background: var(--background-primary);
+    cursor: pointer;
+}
+
+.tt-grid-cell.tt-grid-on {
+    background: var(--interactive-accent);
+    border-color: var(--interactive-accent);
+}
+
+.tt-grid-opts {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.tt-grid-opts label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+}
+
+/* Border dialog */
+.tt-field-label {
+    margin-bottom: 6px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.tt-choice-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 16px;
+}
+
+.tt-choice {
+    flex: 1;
+    padding: 6px 4px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    cursor: pointer;
+    box-shadow: none;
+}
+
+.tt-choice-on {
+    border-color: var(--interactive-accent);
+    color: var(--text-on-accent, var(--text-normal));
+    background: var(--interactive-accent);
+}
+
+/* A real 3x2 grid wearing the same rules as the table, so the pattern is
+   shown rather than described. */
+.tt-border-preview {
+    --tt-line-width: 1px;
+    --tt-line-style: solid;
+    --tt-line-color: var(--background-modifier-border);
+    --tt-preview-line: var(--tt-line-width) var(--tt-line-style) var(--tt-line-color);
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    margin: 16px 0 4px;
+    border-collapse: collapse;
+}
+
+.tt-border-cell {
+    height: 26px;
+    border: var(--tt-line-width) var(--tt-line-style) var(--tt-line-color);
+    /* collapse the shared edges the way a real table does */
+    margin: calc(var(--tt-line-width) * -1) 0 0 calc(var(--tt-line-width) * -1);
+}
+
+.tt-preview-rules .tt-border-cell {
+    border-left: 0;
+    border-right: 0;
+    margin-left: 0;
+}
+
+.tt-preview-box .tt-border-cell,
+.tt-preview-none .tt-border-cell {
+    border: 0;
+    margin: 0;
+}
+
+.tt-preview-box {
+    border: var(--tt-line-width) var(--tt-line-style) var(--tt-line-color);
+}
+
+/* Single row or column edges: nothing but the chosen line, drawn on the
+   preview's first row or first column. */
+.tt-preview-edges .tt-border-cell {
+    border: 0;
+    margin: 0;
+}
+
+.tt-preview-rtop .tt-border-cell:nth-child(-n + 3) {
+    border-top: var(--tt-preview-line);
+}
+
+.tt-preview-rbottom .tt-border-cell:nth-child(-n + 3) {
+    border-bottom: var(--tt-preview-line);
+}
+
+.tt-preview-cleft .tt-border-cell:nth-child(3n + 1) {
+    border-left: var(--tt-preview-line);
+}
+
+.tt-preview-cright .tt-border-cell:nth-child(3n + 1) {
+    border-right: var(--tt-preview-line);
+}
+
+.tt-rowpick {
+    margin: -8px 0 16px;
+}
+
+.tt-rowpick select {
+    width: 100%;
+}
+
+.tt-field-spaced {
+    margin-top: 14px;
+}
+
+/* Cell background picker */
+.tt-shade-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+}
+
+/* The note's own background sits underneath, so the translucent gradient
+   painted on top previews the real result rather than a colour over the
+   modal's panel. */
+.tt-shade {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background-color: var(--background-primary);
+    cursor: pointer;
+    box-shadow: none;
+}
+
+.tt-shade:hover {
+    border-color: var(--interactive-accent);
+}
+
+.tt-shade-on {
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: 1px;
+}
+
+/* "No background", drawn as the usual struck-through empty swatch. */
+.tt-shade-none {
+    background-image: linear-gradient(
+        to top right,
+        transparent 45%,
+        var(--text-error, #e03131) 45%,
+        var(--text-error, #e03131) 55%,
+        transparent 55%
+    );
+}
+
+.tt-shade-custom {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+    color: var(--text-muted);
+}
+
+.tt-shade-custom input[type="color"] {
+    width: 36px;
+    height: 28px;
+    padding: 2px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: none;
+    cursor: pointer;
+}
+
+.tt-shade-custom input[type="range"] {
+    flex: 1;
+    min-width: 60px;
+}
+
+.tt-shade-alpha {
+    min-width: 36px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.tt-shade-preview {
+    width: 44px;
+    height: 28px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background-color: var(--background-primary);
+}
+
+.tt-prompt-desc {
+    margin-bottom: 10px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.tt-prompt-hint {
+    margin-top: 6px;
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+}
+
+/* Settings: preset rows are name + value + picker + delete */
+.tt-setting-row .setting-item-info {
+    display: none;
+}
+
+.tt-setting-row .setting-item-control {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+}
+
+.tt-setting-row input.tt-setting-value {
+    flex-grow: 1;
+    font-family: var(--font-monospace);
+}
+
+.tt-prompt-input {
+    width: 100%;
+    font-family: var(--font-monospace);
+}
+
+.tt-prompt-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+/* ==========================================================================
+   Rendered tables
+   These apply in Live Preview and Reading mode alike, since the plugin emits
+   real HTML that Obsidian renders as-is.
+   ========================================================================== */
+
+table.tt-table {
+    /* Thickness and colour come from one declaration on the <table>, so a
+       whole table restyles without touching a single cell line. Defaults here
+       mean an unstyled table needs no inline style at all, and follows the
+       theme in light and dark alike. */
+    --tt-line-width: 1px;
+    --tt-line-style: solid;
+    --tt-line-color: var(--background-modifier-border);
+    --tt-line: var(--tt-line-width) var(--tt-line-style) var(--tt-line-color);
+    border-collapse: collapse;
+    /* The table declares the same line as its cells. In the collapsed model
+       the widest border wins the shared edge, so this is a second, independent
+       route to a correct perimeter. */
+    border: var(--tt-line);
+    /* Shrink-to-fit, which is what makes the auto-margin alignment below work */
+    width: auto;
+    max-width: 100%;
+}
+
+table.tt-table th,
+table.tt-table td {
+    border: var(--tt-line);
+    padding: 4px 9px;
+    vertical-align: top;
+    text-align: left;
+    /* Without a floor, a column of short or empty cells shrinks to its
+       padding. Override --tt-cell-min-width in a snippet to taste. */
+    min-width: var(--tt-cell-min-width, 3.5em);
+}
+
+/* An empty cell contains no line box at all, so it collapses to the height of
+   its padding — measured at 19x9px against 75x30 for a filled one, which is
+   why a freshly inserted table is almost impossible to see or click into.
+   A zero-width space supplied by CSS gives it a line box of normal text
+   height while putting nothing in the note for you to delete before typing.
+   :empty still matches when row/column markers put a comment in the cell, so
+   this survives that too. */
+table.tt-table :is(th, td):empty::after {
+    content: "\200B";
+}
+
+/* Obsidian styles a table's outer edges with selectors shaped like
+   `tr:last-child td`, `td:first-child` and `td:last-child`. Those out-specify
+   a plain `table.tt-table td`, so without matching their reach a thickness
+   change lands on the interior and the top of the table but stops dead at the
+   bottom, left and right — the edges those selectors own. */
+table.tt-table tr:first-child > :is(th, td) { border-top: var(--tt-line); }
+table.tt-table tr:last-child > :is(th, td) { border-bottom: var(--tt-line); }
+table.tt-table tr > :is(th, td):first-child { border-left: var(--tt-line); }
+table.tt-table tr > :is(th, td):last-child { border-right: var(--tt-line); }
+
+/* ---- Border patterns -----------------------------------------------------
+   "Grid" is the default above and carries no class, so tables written before
+   these existed keep their appearance untouched.
+
+   Each pattern repeats the edge selectors above, because the rules that fixed
+   the perimeter would otherwise out-specify the pattern and put the lines
+   back. Adding the pattern's own class raises these past them.
+
+   They work at all because the table is border-collapse: collapse — adjacent
+   cells share one edge, so removing a side from every cell removes the line
+   rather than leaving one neighbour's half behind. */
+
+/* Horizontal rules only: the typeset look, no vertical lines anywhere. */
+table.tt-table.tt-rules,
+table.tt-table.tt-rules :is(th, td),
+table.tt-table.tt-rules tr > :is(th, td):first-child,
+table.tt-table.tt-rules tr > :is(th, td):last-child {
+    border-left: 0;
+    border-right: 0;
+}
+
+/* One line around the whole table. The cells declare `none`, which loses every
+   border conflict in the collapsed model, leaving the table's own edge to win. */
+table.tt-table.tt-box :is(th, td),
+table.tt-table.tt-box tr:first-child > :is(th, td),
+table.tt-table.tt-box tr:last-child > :is(th, td),
+table.tt-table.tt-box tr > :is(th, td):first-child,
+table.tt-table.tt-box tr > :is(th, td):last-child {
+    border: 0;
+}
+
+/* No lines at all, the table's own edge included. */
+table.tt-table.tt-bare,
+table.tt-table.tt-bare :is(th, td),
+table.tt-table.tt-bare tr:first-child > :is(th, td),
+table.tt-table.tt-bare tr:last-child > :is(th, td),
+table.tt-table.tt-bare tr > :is(th, td):first-child,
+table.tt-table.tt-bare tr > :is(th, td):last-child {
+    border: 0;
+}
+
+/* ---- Individual row and column edges -------------------------------------
+   These are an explicit choice about one specific edge, laid over whatever
+   pattern the table carries. `!important` rather than another round of
+   specificity escalation: they have to beat the pattern rules above (which
+   run to four class-level selectors) AND Obsidian's own `tr:last-child td`
+   family, and stacking classes far enough to out-rank both would be both
+   unreadable and fragile. Removing the class removes the rule entirely, so
+   nothing here can get stuck on.
+
+   The var() chains are written out in full here rather than composed into a
+   single --tt-row-line on the table, which is a trap: a custom property's
+   var()s are substituted where that property is DECLARED, so composing it on
+   the table would bake the table's values in and every row would inherit the
+   same finished string. Spelled out on the cell, each var() resolves against
+   what that cell actually inherits — from its own <tr>, or its own style
+   attribute, or failing both the table. That is what lets row 2 be red while
+   row 4 is blue. */
+table.tt-table tr.tt-rt > :is(th, td) {
+    border-top:
+        var(--tt-row-width, var(--tt-line-width))
+        var(--tt-row-style, var(--tt-line-style))
+        var(--tt-row-color, var(--tt-line-color)) !important;
+}
+
+table.tt-table tr.tt-rb > :is(th, td),
+table.tt-table tr.tt-rule > :is(th, td) {
+    border-bottom:
+        var(--tt-row-width, var(--tt-line-width))
+        var(--tt-row-style, var(--tt-line-style))
+        var(--tt-row-color, var(--tt-line-color)) !important;
+}
+
+table.tt-table :is(th, td).tt-cl {
+    border-left:
+        var(--tt-cl-width, var(--tt-line-width))
+        var(--tt-cl-style, var(--tt-line-style))
+        var(--tt-cl-color, var(--tt-line-color)) !important;
+}
+
+table.tt-table :is(th, td).tt-cr {
+    border-right:
+        var(--tt-cr-width, var(--tt-line-width))
+        var(--tt-cr-style, var(--tt-line-style))
+        var(--tt-cr-color, var(--tt-line-color)) !important;
+}
+
+/* A row's bottom border and the next row's top border are the SAME edge once
+   borders collapse, and the winner is picked by the border-conflict rules —
+   widest first, then style precedence, where solid beats dashed and dotted.
+   That resolution happens after the cascade, so `!important` above has no say
+   in it: a dashed row line at the table's own width simply loses to its
+   neighbour's ordinary grid line and never appears.
+
+   Suppressing the competing side settles it — `none` loses every conflict, so
+   the chosen edge is left to draw uncontested. The :not() guards keep an
+   explicitly set edge on the neighbour from being suppressed by this, and the
+   :has() rules do the same against the table's own perimeter border. */
+table.tt-table tr.tt-rb + tr:not(.tt-rt) > :is(th, td) {
+    border-top: 0 !important;
+}
+
+table.tt-table tr:has(+ tr.tt-rt):not(.tt-rb) > :is(th, td) {
+    border-bottom: 0 !important;
+}
+
+table.tt-table :is(th, td).tt-cr + :is(th, td):not(.tt-cl) {
+    border-left: 0 !important;
+}
+
+table.tt-table :is(th, td):has(+ :is(th, td).tt-cl):not(.tt-cr) {
+    border-right: 0 !important;
+}
+
+/* Same contest at the table's own edge, where the competitor is the table
+   element's border rather than a neighbouring cell. */
+table.tt-table:has(tr:first-child.tt-rt) {
+    border-top: 0 !important;
+}
+
+table.tt-table:has(tr:last-child.tt-rb) {
+    border-bottom: 0 !important;
+}
+
+table.tt-table:has(:is(th, td):first-child.tt-cl) {
+    border-left: 0 !important;
+}
+
+table.tt-table:has(:is(th, td):last-child.tt-cr) {
+    border-right: 0 !important;
+}
+
+table.tt-table th {
+    background: var(--background-secondary);
+    font-weight: 600;
+}
+
+/* Table-level alignment. The one clear win over pipe tables, and it is just
+   two margins. */
+table.tt-table.tt-left {
+    margin-left: 0;
+    margin-right: auto;
+}
+
+table.tt-table.tt-center {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+table.tt-table.tt-right {
+    margin-left: auto;
+    margin-right: 0;
+}
+
+/* Cell alignment. text-align is not one of the properties that applies to
+   <col>, and it does not inherit through one, so it has to live on the cell. */
+table.tt-table th.tt-l,
+table.tt-table td.tt-l { text-align: left; }
+
+table.tt-table th.tt-c,
+table.tt-table td.tt-c { text-align: center; }
+
+table.tt-table th.tt-r,
+table.tt-table td.tt-r { text-align: right; }

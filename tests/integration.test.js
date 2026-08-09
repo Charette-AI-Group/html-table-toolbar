@@ -230,6 +230,184 @@ test('a selection inside a single cell is refused', () => {
     assert.equal(mergeWith({ line: 8, ch: 2 }, { line: 8, ch: 9 }), SAMPLE);
 });
 
+// --- repair: what happens after someone presses Enter in a cell -------------
+// These need a DOMParser, so they run under the stand-in from mocks/dom.js.
+
+const { installDom } = require('./mocks/dom.js');
+const obsidian = require('./mocks/obsidian.js');
+
+// Enter pressed in the middle of "Design review", wrapping the cell over two
+// lines. This is legal now — the tags are the delimiters, not the line.
+const SPLIT = SAMPLE.replace('<td>Design review</td>', '<td>Design\nreview</td>');
+
+test('a cell wrapped across lines is read as one cell, untouched', () => {
+    const ed = new MockEditor(SPLIT, { line: 9, ch: 3 });
+    const p = makePlugin(ed);
+    const loc = p.locate(ed, false);
+    assert.ok(loc, 'it parses without any repair');
+    assert.equal(loc.model.rows[1].cells[0].content, 'Design\nreview');
+    assert.deepEqual({ row: loc.row, cell: loc.cell }, { row: 1, cell: 0 },
+        'the cursor on the second line is still in that cell');
+});
+
+test('operations on a wrapped cell leave the wrapping exactly as typed', () => {
+    obsidian.__notices.length = 0;
+    const ed = new MockEditor(SPLIT, { line: 9, ch: 3 });
+    makePlugin(ed).runOp((m, l) => plugin.__internals.insertRow(m, l.row + 1));
+    assert.equal(
+        obsidian.__notices.some((n) => /inside an HTML table first/.test(n)), false,
+        'no "not in a table": ' + JSON.stringify(obsidian.__notices)
+    );
+    assert.match(ed.getValue(), /<td>Design\nreview<\/td>/, 'still wrapped, no <br> forced in');
+    assert.equal(ed.getValue().split('<tr>').length - 1, 3, 'and the row was inserted');
+});
+
+test('a paragraph break becomes two <br>, while a wrap stays a wrap', () => {
+    const restore = installDom();
+    try {
+        // the blank line is the part that cannot survive: it ends the HTML
+        // block, so it comes back as <br><br>
+        const typed = SAMPLE.replace(
+            '<td>Design review</td>',
+            '<td>First paragraph.\n\nSecond paragraph, which\nwraps across lines.</td>'
+        );
+        const ed = new MockEditor(typed, IN_CELL);
+        makePlugin(ed).runOp(() => null);
+        assert.match(
+            ed.getValue(),
+            /<td>First paragraph\.<br><br>Second paragraph, which\nwraps across lines\.<\/td>/
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('inline markup inside a cell is carried through a repair intact', () => {
+    const restore = installDom();
+    try {
+        const styled = SAMPLE.replace(
+            '<th>Task</th>',
+            '<th><span style="font-style:italic; color:#6e6e6e">Monday</span><br>Suffering</th>'
+        );
+        const ed = new MockEditor(styled, IN_CELL);
+        makePlugin(ed).runOp(() => null);
+        assert.match(ed.getValue(), /<span style="font-style:italic; color:#6e6e6e">Monday<\/span><br>Suffering/);
+    } finally {
+        restore();
+    }
+});
+
+test('Reformat table fixes a paragraph break, on the real-world shape', () => {
+    const restore = installDom();
+    try {
+        const note = [
+            '<table class="tt-table" data-tt="1">',
+            '<tr>',
+            '<th><!-- r01c01 --><span style="font-style:italic; color:#6e6e6e">Monday, June 16, 2025.</span><br>Suffering/Trauma/Pain Body</th>',
+            '</tr>',
+            '<tr>',
+            '<td><!-- r02c01 -->Suffering and Trauma are somewhat the same because trauma can be considered a "GROUP" of sufferings.',
+            '',
+            'I have been hearing Eckhart talking about the "pain body" for years.</td>',
+            '</tr>',
+            '</table>',
+            '',
+        ].join('\n');
+
+        const ed = new MockEditor(note, { line: 5, ch: 30 });
+        const p = makePlugin(ed);
+
+        // it does not parse to begin with, and the diagnosis points at the gap
+        assert.equal(p.locate(ed, false), null);
+        const d = plugin.__internals.diagnose(note.split('\n').slice(0, 10), 0);
+        assert.equal(d.line, 6);
+        assert.match(d.why, /blank line ends the table/);
+
+        p.reformatTable();
+
+        const out = ed.getValue();
+        assert.match(out, /a "GROUP" of sufferings\.<br><br>I have been hearing/, 'paragraph kept as <br><br>');
+        assert.match(out, /<span style="font-style:italic; color:#6e6e6e">Monday, June 16, 2025\.<\/span><br>/,
+            'the font toolbar span survives untouched');
+        assert.ok(
+            plugin.__internals.parseTable(out.split('\n').filter((l) => l.trim()).slice(0)),
+            'and the table parses afterwards'
+        );
+        assert.notEqual(p.locate(ed, false), null, 'the toolbar is live on it again');
+    } finally {
+        restore();
+    }
+});
+
+test('the other ways of breaking a table are repaired too', () => {
+    const restore = installDom();
+    try {
+        for (const broken of [
+            SAMPLE.replace('<tr>\n<td>Design review', '<tr>oops\n<td>Design review'),
+            SAMPLE.replace('<td>Design review</td>', '<td>Design review</td><td>x</td>'),
+            SAMPLE.replace('<td>Alice</td>', '<td>Alice</td>\n'),
+        ]) {
+            const ed = new MockEditor(broken, IN_CELL);
+            makePlugin(ed).runOp(() => null);
+            const lines = ed.getValue().split('\n');
+            const start = lines.findIndex((l) => l.startsWith('<table'));
+            const end = lines.findIndex((l) => l.startsWith('</table>'));
+            assert.ok(
+                plugin.__internals.parseTable(lines.slice(start, end + 1)),
+                'should parse after repair: ' + lines.slice(start, end + 1).join(' / ')
+            );
+        }
+    } finally {
+        restore();
+    }
+});
+
+test('an older table with widths but no sizing classes is brought up to date', () => {
+    const stale = [
+        'Prose.',
+        '',
+        '<table class="tt-table" data-tt="1">',
+        '<colgroup>',
+        '<col style="width:220px">',
+        '<col>',
+        '</colgroup>',
+        '<tr>',
+        '<td>a</td>',
+        '<td>b</td>',
+        '</tr>',
+        '</table>',
+        '',
+    ].join('\n');
+    const ed = new MockEditor(stale, { line: 8, ch: 2 });
+    makePlugin(ed).runOp(() => null);
+    assert.match(ed.getValue(), /<table class="tt-table tt-sized" data-tt="1">/,
+        'any action adds the class that makes the width bind');
+    assert.match(ed.getValue(), /<col style="width:220px">/, 'and the width itself is untouched');
+});
+
+test('a table from when percentages were offered is cleaned up on the next action', () => {
+    const legacy = [
+        '<table class="tt-table tt-sized tt-sized-pct" data-tt="1">',
+        '<colgroup>',
+        '<col style="width:45%">',
+        '<col>',
+        '</colgroup>',
+        '<tr>',
+        '<th>Task</th>',
+        '<th>Owner</th>',
+        '</tr>',
+        '</table>',
+        '',
+    ].join('\n');
+    const ed = new MockEditor(legacy, { line: 6, ch: 5 });
+    makePlugin(ed).runOp(() => null);
+    const open = ed.getValue().split('\n')[0];
+    assert.doesNotMatch(open, /tt-sized-pct/, 'the retired flag is dropped');
+    assert.match(open, /tt-sized/, 'fixed layout is kept, since a width is still set');
+    assert.match(ed.getValue(), /<col style="width:45%">/,
+        'the width itself is left alone — nothing rewrites what you typed');
+});
+
 test('inserting a table inside a table is refused, not spliced in', () => {
     const ed = new MockEditor(SAMPLE, IN_CELL);
     makePlugin(ed).insertTable(2, 2, true);

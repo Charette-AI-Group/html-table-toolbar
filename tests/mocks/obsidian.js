@@ -14,7 +14,11 @@ class Plugin {
     addStatusBarItem() { return null; }
     register() {}
     registerEvent() {}
-    registerDomEvent() {}
+    // Really attaches, when handed one of the DOM stand-ins, so tests can fire
+    // the events the plugin listens for.
+    registerDomEvent(el, name, fn) {
+        if (el && typeof el.addEventListener === 'function') el.addEventListener(name, fn);
+    }
     loadData() { return Promise.resolve({}); }
     saveData() { return Promise.resolve(); }
 }

@@ -20,7 +20,7 @@ const {
     parseTable, serializeTable, lineOfCell, cellAtLine, gridInfo, columnOfCell,
     insertRow, deleteRow, insertColumn, deleteColumn, mergeCells, mergeDirection, splitCell,
     toggleHeaderRow, setCellAlign, setColumnAlign, setTableAlign, setColumnWidth,
-    setTableBorder, currentBorder, setStyleProp, getStyleProp,
+    setTableBorder, currentBorder, setStyleProp, getStyleProp, syncColumnSizing,
     setRowBorder, rowEdges, rowLineFormat, setColumnBorder, columnEdges, columnLineFormat,
     buildTableLines, stampMarker, parseAttrs, attrsToString, getAttr, cellMarker, diagnose,
     parseColor, toRgba, sameColor, isColorish, isLengthish, DEFAULT_CELL_SHADES,
@@ -103,6 +103,66 @@ test('parses the canonical format and round-trips it byte for byte', () => {
     assert.equal(model.rows[0].cells[0].tag, 'th');
     assert.equal(model.rows[1].cells[0].content, 'Design review');
     assert.deepEqual(serializeTable(model), lines);
+});
+
+test('a cell may wrap across lines, closing on a later one', () => {
+    const lines = [
+        '<table class="tt-table" data-tt="1">',
+        '<tr>',
+        '<th><!-- r01c01 --><span style="font-style:italic">Monday</span><br>Suffering</th>',
+        '</tr>',
+        '<tr>',
+        '<td><!-- r02c01 -->Suffering and Trauma are somewhat the same because',
+        'trauma can be considered a "GROUP" of sufferings, i.e., multiple',
+        'sufferings together "forms" a trauma.</td>',
+        '</tr>',
+        '</table>',
+    ];
+    const model = parseTable(lines);
+    assert.ok(model, 'wrapped prose parses');
+    assert.equal(model.rows.length, 2);
+    assert.equal(model.rows[1].cells.length, 1, 'three source lines, one cell');
+    assert.match(model.rows[1].cells[0].content, /^Suffering and Trauma[\s\S]*"forms" a trauma\.$/);
+    assert.equal((model.rows[1].cells[0].content.match(/\n/g) || []).length, 2);
+    assert.deepEqual(serializeTable(model), lines, 'and is written back exactly as typed');
+});
+
+test('every line of a wrapped cell addresses that cell', () => {
+    const lines = [
+        '<table>', '<tr>', '<td>one</td>', '</tr>',
+        '<tr>', '<td>long prose', 'continuing here', 'and ending here</td>', '<td>tail</td>', '</tr>',
+        '</table>',
+    ];
+    const model = parseTable(lines);
+    assert.ok(model);
+    // the wrapped cell occupies source lines 5, 6 and 7
+    for (const off of [5, 6, 7]) {
+        assert.deepEqual(cellAtLine(model, off), { row: 1, cell: 0 }, 'offset ' + off);
+    }
+    assert.deepEqual(cellAtLine(model, 8), { row: 1, cell: 1 }, 'the cell after it still resolves');
+    assert.deepEqual(cellAtLine(model, 4), { row: 1, cell: -1 }, 'the <tr> line is not a cell');
+    assert.deepEqual(cellAtLine(model, 9), { row: 1, cell: -1 }, 'nor the </tr> line');
+    assert.equal(lineOfCell(model, 1, 0), 5, 'lineOfCell gives the first line');
+    assert.equal(lineOfCell(model, 1, 1), 8);
+});
+
+test('structural edits work on a table containing a wrapped cell', () => {
+    const lines = [
+        '<table>', '<tr>', '<td>a', 'wrapped</td>', '<td>b</td>', '</tr>',
+        '<tr>', '<td>c</td>', '<td>d</td>', '</tr>', '</table>',
+    ];
+    const model = parseTable(lines);
+    insertColumn(model, 1);
+    assert.deepEqual(render(model), ['a\nwrapped||b', 'c||d']);
+    assert.equal(model.rows[0].cells[0].content, 'a\nwrapped', 'the wrap is untouched');
+    // and the addressing still holds afterwards
+    assert.deepEqual(cellAtLine(model, lineOfCell(model, 0, 2)), { row: 0, cell: 2 });
+});
+
+test('a blank line still stops everything, even inside a cell', () => {
+    assert.equal(parseTable([
+        '<table>', '<tr>', '<td>first para', '', 'second para</td>', '</tr>', '</table>',
+    ]), null, 'a blank line ends the HTML block, so it cannot be part of a cell');
 });
 
 test('rejects layouts the fast path cannot address by line', () => {
@@ -455,7 +515,7 @@ test('diagnose names the line and the reason for each way of breaking a table', 
         [['<table>', '<tr>', '<td>a</td>', '</tr>bye', '</table>'], 3, /text after <\/tr>/],
         [['<table>', '<tr>', '<td>a</td><td>b</td>', '</tr>', '</table>'], 2, /two cells share this line/],
         [['<table>', '<tr>', '', '<td>a</td>', '</tr>', '</table>'], 2, /blank line ends the table/],
-        [['<table>', '<tr>', '<td>a', '</tr>', '</table>'], 2, /own line/],
+        [['<table>', '<tr>', '<td>a', '</tr>', '</table>'], 2, /never closed/],
     ];
     for (const [lines, offset, pattern] of cases) {
         assert.equal(parseTable(lines), null, 'fixture should not parse: ' + lines[offset]);
@@ -642,10 +702,81 @@ test('an unknown pattern or line type is refused', () => {
     );
 });
 
+test('a width with no unit is refused instead of written as invalid CSS', () => {
+    const model = parsed(['a|b']);
+    assert.throws(() => setColumnWidth(model, 0, '38'), /not a CSS length/);
+    assert.throws(() => setColumnWidth(model, 0, 'wide'), /not a CSS length/);
+    assert.equal(model.cols, null, 'nothing was written');
+    assert.equal(serializeTable(model)[0], '<table>', 'and no sizing class was added');
+    for (const ok of ['12em', '220px', '10rem', 'auto', 'calc(100% - 2em)']) {
+        const m = parsed(['a|b']);
+        setColumnWidth(m, 0, ok);
+        assert.match(serializeTable(m)[0], /tt-sized/, ok + ' should be accepted');
+    }
+});
+
+test('a percentage is refused, with a reason rather than silently doing nothing', () => {
+    const model = parsed(['a|b']);
+    assert.throws(() => setColumnWidth(model, 0, '45%'), /absolute units/);
+    assert.throws(() => setColumnWidth(model, 0, ' 100% '), /absolute units/);
+    assert.equal(model.cols, null, 'nothing was written');
+});
+
+test('a column width marks the table so the width actually binds', () => {
+    const model = parsed(['a|b|c']);
+    setColumnWidth(model, 0, '220px');
+    // fixed layout, and the table still sizes to its content
+    assert.match(serializeTable(model)[0], /class="tt-sized"/);
+});
+
+test('the sizing mark comes off again with the last width', () => {
+    const model = parsed(['a|b|c']);
+    setColumnWidth(model, 0, '10em');
+    setColumnWidth(model, 1, '120px');
+    assert.match(serializeTable(model)[0], /tt-sized/);
+    setColumnWidth(model, 0, '');
+    assert.match(serializeTable(model)[0], /tt-sized/, 'one width remains');
+    // dropping the last width clears the mark, and the colgroup with it
+    setColumnWidth(model, 1, '');
+    assert.equal(serializeTable(model)[0], '<table>');
+    assert.equal(model.cols, null);
+});
+
+test('deleting the last sized column clears the sizing mark', () => {
+    const model = parsed(['a|b']);
+    setColumnWidth(model, 0, '14em');
+    assert.match(serializeTable(model)[0], /tt-sized/);
+    deleteColumn(model, 0);
+    assert.doesNotMatch(serializeTable(model)[0], /tt-sized/);
+});
+
+test('a table still carrying the retired percentage flag sheds it', () => {
+    const model = parseTable([
+        '<table class="tt-table tt-sized tt-sized-pct" data-tt="1">',
+        '<colgroup>', '<col style="width:12em">', '<col>', '</colgroup>',
+        '<tr>', '<td>a</td>', '<td>b</td>', '</tr>', '</table>',
+    ]);
+    syncColumnSizing(model);
+    const open = serializeTable(model)[0];
+    assert.match(open, /tt-sized/);
+    assert.doesNotMatch(open, /tt-sized-pct/);
+});
+
+test('column width coexists with the table alignment and border classes', () => {
+    const model = parsed(['a|b']);
+    setTableAlign(model, 'center');
+    setTableBorder(model, 'rules', PLAIN);
+    setColumnWidth(model, 0, '12em');
+    const open = serializeTable(model)[0];
+    for (const c of ['tt-center', 'tt-rules', 'tt-sized']) {
+        assert.match(open, new RegExp(c), 'expected ' + c);
+    }
+});
+
 test('column width creates a colgroup on demand and removes it when empty', () => {
     const model = parsed(['a|b']);
-    setColumnWidth(model, 0, '40%');
-    assert.deepEqual(serializeTable(model).slice(1, 4), ['<colgroup>', '<col style="width:40%">', '<col>']);
+    setColumnWidth(model, 0, '14em');
+    assert.deepEqual(serializeTable(model).slice(1, 4), ['<colgroup>', '<col style="width:14em">', '<col>']);
     setColumnWidth(model, 0, '');
     assert.equal(model.cols, null, 'an all-empty colgroup is dropped');
 });

@@ -32,6 +32,15 @@ const TABLE_BORDER_GROUP = Object.values(TABLE_BORDER).filter(Boolean);
 // Individual row and column edges, on top of whichever pattern the table
 // carries. Rows mark the <tr>; columns have no element spanning them, so they
 // mark the cells that sit on the edge in question.
+// Set when any column carries an explicit width, so the stylesheet can put the
+// table into the fixed layout those widths need in order to bind.
+const SIZED_CLASS = 'tt-sized';
+// No longer written. Percentage column widths required giving the table a
+// width of its own, which changed how the whole table sat on the page and made
+// centring meaningless — more surprise than the feature was worth. Kept only
+// so the class can be cleared from tables that already carry it.
+const SIZED_PCT_CLASS = 'tt-sized-pct';
+
 const ROW_EDGE = { top: 'tt-rt', bottom: 'tt-rb' };
 const COL_EDGE = { left: 'tt-cl', right: 'tt-cr' };
 // tt-rule is the superseded single-row class: still understood, still styled,
@@ -89,6 +98,10 @@ const RE_CELL_MARKER = /^<!--\s*(?:r[\d-]+)?c[\d-]+\s*-->/i;
 const RE_LEGEND = /^[ \t]*<!--\s*cols:[\s\S]*?-->[ \t]*$/i;
 const RE_TR_CLOSE = /^[ \t]*<\/tr>[ \t]*$/i;
 const RE_CELL = /^[ \t]*<(td|th)\b([^>]*)>([\s\S]*)<\/\1>[ \t]*$/i;
+// A cell may also run over several lines, closing on a later one. The tags are
+// the delimiters, so long prose can be wrapped in the source the way it was
+// typed rather than forced onto one very long line.
+const RE_CELL_OPEN = /^[ \t]*<(td|th)\b([^>]*)>/i;
 // Loose matchers, used only to find a table worth reformatting.
 const RE_TABLE_OPEN_LOOSE = /<table\b/i;
 const RE_TABLE_CLOSE_LOOSE = /<\/table>/i;
@@ -282,26 +295,50 @@ function parseTable(lines) {
         const row = { attrs: parseAttrs(tr[1]), cells: [] };
         i++;
         while (i < last) {
-            const c = RE_CELL.exec(lines[i]);
-            if (!c) break;
-            // The content capture is greedy, so two cells sharing a line would
-            // otherwise parse as one cell whose text contains `</td><td>`.
-            // That silently breaks line-as-address, so reject it: a closing
-            // cell tag inside content means this line is not canonical. It
-            // also rules out a nested table, which the format cannot hold.
-            if (/<\/(?:td|th)>/i.test(c[3])) return null;
+            const open = RE_CELL_OPEN.exec(lines[i]);
+            if (!open) break;
+            const tag = open[1].toLowerCase();
+            const single = RE_CELL.exec(lines[i]);
+            let content;
+
+            if (single && single[1].toLowerCase() === tag) {
+                // The content capture is greedy, so two cells sharing a line
+                // would otherwise parse as one cell whose text contains
+                // `</td><td>`. That silently breaks line-as-address, so reject
+                // it. It also rules out a nested table, which cannot be held.
+                if (/<\/(?:td|th)>/i.test(single[3])) return null;
+                content = single[3];
+            } else {
+                // Runs past this line: gather until one ends with the matching
+                // closing tag. A blank line still stops everything, because it
+                // ends the HTML block itself and no parser leniency can undo
+                // that.
+                const parts = [lines[i].slice(open[0].length)];
+                if (/<\/(?:td|th)>/i.test(parts[0])) return null;
+                const closeRe = new RegExp('^([\\s\\S]*)<\\/' + tag + '>[ \\t]*$', 'i');
+                let j = i + 1;
+                let closed = false;
+                while (j < last) {
+                    const l = lines[j];
+                    if (!l.trim()) return null;
+                    const end = closeRe.exec(l);
+                    if (end) { parts.push(end[1]); closed = true; break; }
+                    if (/<\/(?:td|th)>/i.test(l)) return null;
+                    parts.push(l);
+                    j++;
+                }
+                if (!closed) return null;
+                content = parts.join('\n');
+                i = j;
+            }
+
             // The marker is generated, not content: strip it so it cannot be
             // duplicated on the next write or leak into a merge's joined text.
-            let content = c[3];
             if (RE_CELL_MARKER.test(content)) {
                 model.markers = true;
                 content = content.replace(RE_CELL_MARKER, '');
             }
-            row.cells.push({
-                tag: c[1].toLowerCase(),
-                attrs: parseAttrs(c[2]),
-                content,
-            });
+            row.cells.push({ tag, attrs: parseAttrs(open[2]), content });
             i++;
         }
         // A row emptied by a full-width rowspan above it is legal, so zero
@@ -342,8 +379,9 @@ function serializeTable(model) {
         for (const col of model.cols) out.push('<col' + attrsToString(col) + '>');
         out.push('</colgroup>');
     }
-    // The grid is only needed for the column numbers, so unmarked tables pay
-    // nothing for it.
+    // A cell wrapped across lines emits several, so the composed string is
+    // split before it goes out — every element of the returned array is still
+    // exactly one line.
     const info = model.markers ? gridInfo(model) : null;
     model.rows.forEach((row, r) => {
         out.push('<tr' + attrsToString(row.attrs) + '>');
@@ -358,7 +396,9 @@ function serializeTable(model) {
                     info.cols
                 )
                 : '';
-            out.push('<' + cell.tag + attrsToString(cell.attrs) + '>' + mark + cell.content + '</' + cell.tag + '>');
+            const composed = '<' + cell.tag + attrsToString(cell.attrs) + '>'
+                + mark + cell.content + '</' + cell.tag + '>';
+            for (const part of composed.split('\n')) out.push(part);
         });
         out.push('</tr>');
     });
@@ -374,12 +414,26 @@ function preludeLines(model) {
     return n;
 }
 
-// The whole point of one-cell-per-line: cell address <-> line number is
-// arithmetic, no offset mapping needed.
+// How many source lines a cell occupies. One, unless its content was wrapped.
+function cellLineCount(cell) {
+    return 1 + (cell.content.match(/\n/g) || []).length;
+}
+
+function rowLineCount(row) {
+    let n = 2; // <tr> and </tr>
+    for (const cell of row.cells) n += cellLineCount(cell);
+    return n;
+}
+
+// Cell address <-> line number is still arithmetic — walking line counts
+// rather than counting cells, now that a cell can span more than one line.
+// Returns the FIRST line of the cell.
 function lineOfCell(model, r, ci) {
     let n = preludeLines(model);
-    for (let i = 0; i < r; i++) n += 2 + model.rows[i].cells.length;
-    return n + 1 + ci;
+    for (let i = 0; i < r; i++) n += rowLineCount(model.rows[i]);
+    n += 1; // the <tr> line
+    for (let k = 0; k < ci; k++) n += cellLineCount(model.rows[r].cells[k]);
+    return n;
 }
 
 // Inverse of lineOfCell, mapping a line in the SOURCE we parsed. `cell` is -1
@@ -398,10 +452,16 @@ function cellAtLine(model, off) {
         n += 2 + model.cols.length;
     }
     for (let r = 0; r < model.rows.length; r++) {
-        const count = model.rows[r].cells.length;
-        if (off === n || off === n + count + 1) return { row: r, cell: -1 };
-        if (off > n && off <= n + count) return { row: r, cell: off - n - 1 };
-        n += 2 + count;
+        if (off === n) return { row: r, cell: -1 };      // the <tr> line
+        let m = n + 1;
+        for (let ci = 0; ci < model.rows[r].cells.length; ci++) {
+            const span = cellLineCount(model.rows[r].cells[ci]);
+            // Anywhere within a wrapped cell counts as being in that cell.
+            if (off >= m && off < m + span) return { row: r, cell: ci };
+            m += span;
+        }
+        if (off === m) return { row: r, cell: -1 };      // the </tr> line
+        n = m + 1;
     }
     return { row: -1, cell: -1 };
 }
@@ -415,23 +475,68 @@ function diagnose(lines, base) {
     if (!lines.length || !RE_TABLE_OPEN.test(lines[0])) return at(0, 'the <table> tag needs a line to itself');
 
     const last = lines.length - 1;
+    // Tracks the cell currently left open, so a wrapped cell's continuation
+    // lines are read as its content rather than as stray text.
+    let open = null;
+    let openedAt = 0;
     for (let i = 1; i < last; i++) {
         const l = lines[i];
-        if (!l.trim()) return at(i, 'a blank line ends the table');
+        if (!l.trim()) {
+            return at(i, open
+                ? 'a blank line ends the table; reformatting turns it into <br><br>'
+                : 'a blank line ends the table');
+        }
+        if (open) {
+            if (new RegExp('<\\/' + open + '>[ \\t]*$', 'i').test(l)) open = null;
+            else if (/<\/(?:td|th)>/i.test(l)) return at(i, 'a different cell closes inside this one');
+            continue;
+        }
         if (/^[ \t]*<tr\b/i.test(l) && !RE_TR_OPEN.test(l)) {
             return at(i, 'text on the <tr> line — cell text belongs between <td> and </td>');
         }
         if (/^[ \t]*<\/tr>/i.test(l) && !RE_TR_CLOSE.test(l)) return at(i, 'text after </tr>');
         if (/<\/(?:td|th)>[\s\S]*<(?:td|th)\b/i.test(l)) return at(i, 'two cells share this line');
-        if (/^[ \t]*<(?:td|th)\b/i.test(l) && !RE_CELL.test(l)) {
-            return at(i, 'this cell does not open and close on its own line');
+        const cellOpen = RE_CELL_OPEN.exec(l);
+        if (cellOpen && !RE_CELL.test(l)) {
+            if (/<\/(?:td|th)>/i.test(l.slice(cellOpen[0].length))) {
+                return at(i, 'this cell does not close at the end of its line');
+            }
+            open = cellOpen[1].toLowerCase();
+            openedAt = i;
+            continue;
         }
         if (!/^[ \t]*<(?:tr\b|\/tr>|td\b|th\b|col\b|colgroup\b|\/colgroup>|!--)/i.test(l)) {
             return at(i, 'text outside a cell — it belongs between <td> and </td>');
         }
     }
+    // Point at where the cell opened, not where we ran out of table — that is
+    // the line whose closing tag is missing.
+    if (open) return at(openedAt, 'this cell is never closed');
     if (!RE_TABLE_CLOSE.test(lines[last])) return at(last, 'the </table> tag needs a line to itself');
     return null;
+}
+
+// How many cells start before this line. A table being repaired does not
+// parse, so there is no model to ask — counting opening tags is the only way
+// to keep the caret near where the author was working instead of throwing
+// them back to the first cell.
+function cellsBefore(lines, offset) {
+    let n = 0;
+    for (let i = 0; i < offset && i < lines.length; i++) {
+        if (RE_CELL_OPEN.test(lines[i])) n++;
+    }
+    return Math.max(0, n - 1);
+}
+
+// The nth cell of the table, counting across rows.
+function cellByIndex(model, n) {
+    let seen = 0;
+    for (let r = 0; r < model.rows.length; r++) {
+        const len = model.rows[r].cells.length;
+        if (n < seen + len) return { row: r, cell: n - seen };
+        seen += len;
+    }
+    return { row: 0, cell: 0 };
 }
 
 // Which cell an end of a mouse selection refers to. Endpoints routinely miss
@@ -620,7 +725,10 @@ function insertColumn(model, at) {
         row.cells.splice(idx, 0, newCell(tag));
     }
 
-    if (model.cols) model.cols.splice(Math.min(at, model.cols.length), 0, []);
+    if (model.cols) {
+        model.cols.splice(Math.min(at, model.cols.length), 0, []);
+        syncColumnSizing(model);
+    }
     return { row: 0, cell: 0, column: at };
 }
 
@@ -647,7 +755,10 @@ function deleteColumn(model, at) {
     for (const x of removals) model.rows[x.r].cells.splice(x.ci, 1);
     model.rows = model.rows.filter((row) => row.cells.length);
     if (!model.rows.length) fail('That would empty the table. Use "Delete table" instead.');
-    if (model.cols && at < model.cols.length) model.cols.splice(at, 1);
+    if (model.cols && at < model.cols.length) {
+        model.cols.splice(at, 1);
+        syncColumnSizing(model);
+    }
     return { row: 0, cell: 0, column: Math.max(0, at - 1) };
 }
 
@@ -951,7 +1062,29 @@ function ensureColgroup(model) {
     return model.cols;
 }
 
+// A <col> width binds only in a fixed table layout, so that is recorded as a
+// class for the stylesheet to act on, and comes off again when the last width
+// goes.
+function syncColumnSizing(model) {
+    const widths = (model.cols || [])
+        .map((col) => (getStyleProp(col, 'width') || '').trim())
+        .filter(Boolean);
+    setExclusiveClass(model.attrs, widths.length ? SIZED_CLASS : null, [SIZED_CLASS]);
+    // Always cleared: a table styled while percentages were still offered
+    // sheds the flag the first time anything touches it.
+    setExclusiveClass(model.attrs, null, [SIZED_PCT_CLASS]);
+}
+
 function setColumnWidth(model, col, width) {
+    // Written unchecked, a value with no unit — a bare "38" meant as a
+    // width — becomes `width:38`, which is not a CSS length. The browser drops
+    // it silently, so the column never moves and nothing says why.
+    if (width && width.trim().endsWith('%')) {
+        fail('Column widths use absolute units — try 12em or 220px. A percentage would have to be a percentage of a fixed table width, which changes how the whole table sits on the page.');
+    }
+    if (width && !isLengthish(width)) {
+        fail('"' + width + '" is not a CSS length. Try 12em or 220px — a number on its own has no unit, so the browser ignores it.');
+    }
     const cols = ensureColgroup(model);
     if (col >= cols.length) fail('That column does not exist.');
     setStyleProp(cols[col], 'width', width);
@@ -960,6 +1093,7 @@ function setColumnWidth(model, col, width) {
         model.cols = null;
         model.colgroupAttrs = null;
     }
+    syncColumnSizing(model);
     return null;
 }
 
@@ -1000,9 +1134,14 @@ function modelFromElement(table) {
             row.cells.push({
                 tag: td.tagName.toLowerCase(),
                 attrs: Array.from(td.attributes).map((a) => ({ name: a.name, value: a.value })),
-                // Cell content must end up on one line: a blank line inside an
-                // HTML block terminates it under CommonMark.
-                content: td.innerHTML.replace(/\s*\r?\n\s*/g, ' ').trim(),
+                // A blank line inside an HTML block terminates it under
+                // CommonMark, so a paragraph break cannot survive as one and
+                // becomes two <br>. An ordinary wrap can survive, and is left
+                // exactly as the author typed it. Trimmed first, so
+                // indentation around the content does not become stray breaks.
+                content: td.innerHTML
+                    .trim()
+                    .replace(/[ \t]*\r?\n[ \t]*\r?\n\s*/g, '<br><br>'),
             });
         }
         model.rows.push(row);
@@ -1183,7 +1322,7 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
 
         if (this.settings.statusBar) {
             this.statusEl = this.addStatusBarItem();
-            if (this.statusEl) this.statusEl.addClass('tt-status');
+            this.wireStatusBar();
         }
 
         for (const cmd of this.commandList()) {
@@ -1215,6 +1354,17 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    // When the readout is reporting an unreadable table it doubles as the fix:
+    // telling someone to "press a button" is no use if they cannot tell which
+    // one, so the warning itself is the button.
+    wireStatusBar() {
+        if (!this.statusEl) return;
+        this.statusEl.addClass('tt-status');
+        this.registerDomEvent(this.statusEl, 'click', () => {
+            if (this.statusEl.hasClass('tt-status-warn')) this.reformatTable();
+        });
     }
 
     toggleToolbar() {
@@ -1301,11 +1451,19 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
             const fixed = canonicalize(this.blockText(ed, block).join('\n'), this.settings.rowMarkers);
             if (fixed) {
                 this.replaceBlock(ed, block, fixed);
-                block = this.findTableBlock(ed, from.line);
+                // Re-find from the <table> line, which cannot move, rather
+                // than from the cursor's line, which can. Repair often makes
+                // the block SHORTER — rejoining a cell split by a stray Enter
+                // takes a line out — and a stale cursor line then sits past
+                // </table>, so looking from there reported "not in a table"
+                // immediately after successfully fixing the table.
+                block = this.findTableBlock(ed, block.start);
                 if (block) model = parseTable(this.blockText(ed, block));
             }
         }
         if (!model) return null;
+        // A repair may have moved the ground under the cursor, so an offset
+        // past the end of the block simply resolves to the first cell.
         const pos = cellAtLine(model, from.line - block.start);
         const row = pos.row < 0 ? 0 : pos.row;
         const cells = model.rows[row].cells.length;
@@ -1349,6 +1507,10 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         // Markers are a global mode, so any table this plugin writes conforms
         // to it regardless of what the source happened to carry.
         loc.model.markers = this.settings.rowMarkers;
+        // Tables that had column widths set before those widths could bind
+        // carry no sizing classes, so any action brings them up to date rather
+        // than waiting for the width to be typed in again.
+        syncColumnSizing(loc.model);
         stampMarker(loc.model);
         const lines = serializeTable(loc.model);
         this.replaceBlock(ed, loc.block, lines);
@@ -1363,7 +1525,9 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         const cells = model.rows[row].cells.length;
         if (!cells) { ed.focus(); return; }
         const cell = Math.max(0, Math.min(target.cell === undefined ? 0 : target.cell, cells - 1));
-        const line = base + lineOfCell(model, row, cell);
+        // The closing tag of a wrapped cell is on its last line, not its first.
+        const line = base + lineOfCell(model, row, cell)
+            + cellLineCount(model.rows[row].cells[cell]) - 1;
         const text = ed.getLine(line) || '';
         const ch = text.lastIndexOf('</');
         ed.setCursor({ line, ch: ch < 0 ? text.length : ch });
@@ -1415,11 +1579,15 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         const from = ed.getCursor('from');
         const block = this.findTableBlock(ed, from.line) || this.findLooseBlock(ed, from.line);
         if (!block) { new Notice('Put the cursor inside an HTML table first'); return; }
-        const fixed = canonicalize(this.blockText(ed, block).join('\n'), this.settings.rowMarkers);
+        const source = this.blockText(ed, block);
+        const fixed = canonicalize(source.join('\n'), this.settings.rowMarkers);
         if (!fixed) { new Notice('Could not read that table (nested tables are not supported).'); return; }
+        // Where the caret was, in cells rather than lines, so it can be put
+        // back after a repair that changes how many lines the table takes.
+        const wasIn = cellsBefore(source, from.line - block.start);
         this.replaceBlock(ed, block, fixed);
         const model = parseTable(fixed);
-        if (model) this.focusCell(ed, block.start, model, { row: 0, cell: 0 });
+        if (model) this.focusCell(ed, block.start, model, cellByIndex(model, wasIn));
         new Notice('Table reformatted');
         this.updateContext();
     }
@@ -1473,10 +1641,14 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         if (this.statusEl) {
             this.statusEl.setText(
                 loc ? this.describePosition(loc)
-                    : problem ? 'Table: line ' + (problem.line + 1) + ' — ' + problem.why
+                    : problem
+                        ? 'Table: line ' + (problem.line + 1) + ' — ' + problem.why + ' · click to fix'
                         : ''
             );
             this.statusEl.toggleClass('tt-status-warn', !!problem);
+            this.statusEl.title = problem
+                ? 'Click to reformat this table and fix this'
+                : '';
         }
         if (this.markerBtn) this.markerBtn.classList.toggle('tt-on', !!this.settings.rowMarkers);
 
@@ -1700,13 +1872,13 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
             : '';
         new TextPromptModal(this.app, {
             title: 'Column ' + (col + 1) + ' width',
-            desc: 'A CSS length such as 38%, 12em or 220px.',
-            hint: 'Applying an empty field lets the column size itself again.',
+            desc: 'An absolute CSS length — 12em or 220px. Ems scale with your font size, pixels do not.',
+            hint: 'Percentages are not accepted: one would only work by pinning the table to a fixed width of its own, which changes how the whole table sits on the page. An empty field lets the column size itself again.',
             // The column's own width if it has one, otherwise the width you
             // set last — so giving several columns the same width is one
             // click each.
             value: (current || '').trim() || this.settings.lastColumnWidth || '',
-            placeholder: '38%',
+            placeholder: '12em',
             onSubmit: (v) => {
                 const width = v.trim();
                 if (isLengthish(width)) {
@@ -1983,6 +2155,7 @@ module.exports.__internals = {
     insertRow, deleteRow, insertColumn, deleteColumn, mergeCells, mergeDirection, splitCell,
     toggleHeaderRow, setCellAlign, setColumnAlign, setTableAlign, setColumnWidth,
     setTableBorder, currentBorder, setStyleProp, getStyleProp, setExclusiveClass,
+    syncColumnSizing,
     setRowBorder, rowEdges, rowLineFormat, setColumnBorder, columnEdges, columnLineFormat,
     setCellBackground, buildTableLines, stampMarker, parseAttrs, attrsToString,
     getAttr, setAttr, getClasses, canonicalize, cellMarker,

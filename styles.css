@@ -207,6 +207,11 @@
    has to look different from an ordinary R/C position. */
 .tt-status.tt-status-warn {
     color: var(--text-warning, var(--text-accent));
+    cursor: pointer;
+}
+
+.tt-status.tt-status-warn:hover {
+    text-decoration: underline;
 }
 
 /* ==========================================================================
@@ -523,6 +528,22 @@ table.tt-table td {
     /* Without a floor, a column of short or empty cells shrinks to its
        padding. Override --tt-cell-min-width in a snippet to taste. */
     min-width: var(--tt-cell-min-width, 3.5em);
+}
+
+/* ---- Column widths -------------------------------------------------------
+   A <col> width only binds when the table is in fixed layout. In the default
+   auto layout the browser sizes columns from their content and treats the
+   declared width as a suggestion. */
+table.tt-table.tt-sized {
+    table-layout: fixed;
+}
+
+/* The empty-cell floor below would otherwise clamp every narrow column to the
+   same size — 20px and 40px both came out at 68px, which reads as "the number
+   makes no difference". Columns left unsized still take their share of the
+   remainder in fixed layout, so nothing collapses. */
+table.tt-table.tt-sized :is(th, td) {
+    min-width: 0;
 }
 
 /* An empty cell contains no line box at all, so it collapses to the height of

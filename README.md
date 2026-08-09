@@ -66,7 +66,7 @@ Tables are written in a canonical layout — one tag per line, one **cell** per 
 ```html
 <table class="tt-table" data-tt="1">
 <colgroup>
-<col style="width:38%">
+<col style="width:14em">
 <col>
 </colgroup>
 <tr>
@@ -83,7 +83,17 @@ Tables are written in a canonical layout — one tag per line, one **cell** per 
 This is not cosmetic. Because each cell owns a line, the line number *is* the cell address: "which cell is the cursor in?" is arithmetic rather than an HTML parse with offset mapping. Two rules make it work, and both are load-bearing:
 
 - **No blank lines inside the table.** Under CommonMark a blank line ends an HTML block, so a gap between rows would terminate the table and dump the rest as literal text. Cells that need internal breaks use `<br>` and stay on one line.
-- **One cell per line.** Two cells sharing a line is rejected by the fast parser rather than tolerated.
+
+  A single Enter needs no `<br>` — it just wraps the cell, which is fine. It is the **blank** line that cannot survive: pressing Enter twice for a paragraph ends the HTML block, and no parser leniency can change that. The break is not lost, though — the status bar says what happened, and the next toolbar action or **Reformat table** turns it into `<br><br>`, which renders as the paragraph you meant.
+- **One cell per line — or per block of lines.** Two cells sharing a line is rejected. A single cell *may* run over several lines, closing on a later one, so long prose can stay wrapped in the source the way you typed it rather than being forced onto one enormous line. The tags are the delimiters, not the line break:
+
+```html
+<td>Suffering and Trauma are somewhat the same because
+trauma can be considered a "GROUP" of sufferings, i.e.,
+multiple sufferings together "forms" a trauma.</td>
+```
+
+  Every line of that cell addresses that cell, so the toolbar works with the cursor anywhere inside it, and the wrapping is written back exactly as you left it.
 - **All text lives between `<td>` and `</td>`.** A `<tr>` line holds nothing but the tag, and neither does `</tr>`. Typing on one of those lines — or on a line of its own between cells — makes the table unreadable to the fast parser.
 
 That last one is the easy mistake to make, so the plugin tells you when it happens: the status bar names the line and the reason, for example `Table: line 8 — text on the <tr> line`. The toolbar stays live, because every button repairs the table before acting — pressing any of them, or **Reformat table**, puts it right.

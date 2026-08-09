@@ -87,6 +87,65 @@ class FakeEl {
     }
 }
 
+// A stand-in for DOMParser covering table markup only — enough to exercise the
+// plugin's repair path, which is otherwise untestable under Node and had been
+// hiding bugs because of it. It is not a real HTML parser: it handles the
+// canonical shape and the ways a person breaks it by hand (a cell split across
+// lines, stray text, a blank line), which is what repair actually meets.
+const ATTRS = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+
+function attrsOf(s) {
+    const out = [];
+    ATTRS.lastIndex = 0;
+    let m;
+    while ((m = ATTRS.exec(s || '')) !== null) {
+        const v = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+        out.push({ name: m[1], value: v === undefined ? '' : v });
+    }
+    return out;
+}
+
+function fakeTable(text) {
+    const open = /<table\b([^>]*)>/i.exec(text);
+    if (!open) return null;
+    const body = text.slice(open.index + open[0].length);
+
+    const cg = /<colgroup\b([^>]*)>([\s\S]*?)<\/colgroup>/i.exec(body);
+    const colgroup = cg && {
+        attributes: attrsOf(cg[1]),
+        querySelectorAll: () => (cg[2].match(/<col\b[^>]*>/gi) || []).map((c) => ({
+            attributes: attrsOf(/<col\b([^>]*?)\/?>/i.exec(c)[1]),
+        })),
+    };
+
+    const rows = [];
+    const rowRe = /<tr\b([^>]*)>([\s\S]*?)<\/tr>/gi;
+    let r;
+    while ((r = rowRe.exec(body)) !== null) {
+        const inner = r[2];
+        const cells = [];
+        const cellRe = /<(td|th)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
+        let c;
+        while ((c = cellRe.exec(inner)) !== null) {
+            cells.push({ tagName: c[1].toUpperCase(), attributes: attrsOf(c[2]), innerHTML: c[3] });
+        }
+        rows.push({ attributes: attrsOf(r[1]), cells });
+    }
+
+    return {
+        attributes: attrsOf(open[1]),
+        rows,
+        querySelector: (sel) => (/colgroup/.test(sel) ? colgroup : null),
+    };
+}
+
+class FakeDOMParser {
+    parseFromString(text) {
+        const table = fakeTable(text);
+        return { querySelector: (sel) => (sel === 'table' ? table : null) };
+    }
+}
+
 // Installs the globals the plugin reaches for, and returns a restore function.
 function installDom() {
     const saved = {
@@ -94,7 +153,9 @@ function installDom() {
         window: global.window,
         Option: global.Option,
         MutationObserver: global.MutationObserver,
+        DOMParser: global.DOMParser,
     };
+    global.DOMParser = FakeDOMParser;
     const body = new FakeEl('body');
     global.document = {
         body,
@@ -111,4 +172,4 @@ function installDom() {
     return () => Object.assign(global, saved);
 }
 
-module.exports = { FakeEl, installDom };
+module.exports = { FakeEl, FakeDOMParser, installDom };

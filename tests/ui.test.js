@@ -235,6 +235,75 @@ test('a readable table still reports position, and outside one reports nothing',
     }
 });
 
+// The status bar warning is also the fix, so clicking it has to actually
+// rewrite the note — not merely look clickable.
+function statusBarFor(text, cursor) {
+    const ed = new MockEditor(text, cursor);
+    const p = makePlugin(ed);
+    delete p.updateContext;
+    p.buildToolbar();
+    p.statusEl = new (require('./mocks/dom.js').FakeEl)('div');
+    p.wireStatusBar();
+    p.updateContext();
+    return { ed, p, el: p.statusEl };
+}
+
+test('clicking the warning rewrites the table in the document', () => {
+    const restore = installDom();
+    try {
+        const { ed, el } = statusBarFor(BROKEN, { line: 8, ch: 4 });
+        assert.equal(el.classes.has('tt-status-warn'), true, 'the warning is showing');
+        assert.match(el.title, /Click to reformat/);
+        const before = ed.getValue();
+
+        el.fire('click');
+
+        assert.notEqual(ed.getValue(), before, 'the note actually changed');
+        assert.equal(ed.getValue().includes('<tr>oops'), false, 'the stray text is gone');
+        assert.ok(
+            plugin.__internals.parseTable(ed.getValue().split('\n').slice(2, 12)),
+            'and the table parses afterwards'
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('clicking the readout does nothing when it is not a warning', () => {
+    const restore = installDom();
+    try {
+        const { ed, el } = statusBarFor(TABLE, IN_CELL);
+        assert.equal(el.classes.has('tt-status-warn'), false);
+        assert.equal(el.title, '');
+        const before = ed.getValue();
+        el.fire('click');
+        assert.equal(ed.getValue(), before, 'an ordinary R/C readout is inert');
+    } finally {
+        restore();
+    }
+});
+
+test('a repair keeps the caret near the cell it was in, not at the first', () => {
+    const restore = installDom();
+    try {
+        // break the table at the LAST cell, and start the caret there
+        const late = TABLE.replace('<td>Alice</td>', '<td>Alice\nmore text</td>');
+        const broken = late.replace('<tr>\n<td>Design review', '<tr>oops\n<td>Design review');
+        const ed = new MockEditor(broken, { line: 10, ch: 2 });
+        const p = makePlugin(ed);
+        p.reformatTable();
+        // Ask the plugin where the caret now is, rather than guessing from the
+        // line text — a wrapped cell's caret sits on its last line, by the
+        // closing tag, which is the right place but not the first line.
+        const loc = p.locate(ed, false);
+        assert.ok(loc, 'the table parses after the repair');
+        assert.deepEqual({ row: loc.row, cell: loc.cell }, { row: 1, cell: 1 },
+            'back in the last cell, not thrown to the first');
+    } finally {
+        restore();
+    }
+});
+
 // Catch whichever modal a click opens, so dialogs can be driven from the
 // outside without widening the plugin's exports just for tests.
 function captureModals(fn) {

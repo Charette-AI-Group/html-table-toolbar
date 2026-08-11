@@ -57,6 +57,11 @@ class FakeEl {
     appendText(t) { this.text += t; }
     setText(t) { this.text = String(t); }
     setAttribute(k, v) { this.attributes[k] = v; }
+    getAttribute(k) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, k) ? this.attributes[k] : null;
+    }
+    removeAttribute(k) { delete this.attributes[k]; }
+    hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attributes, k); }
     empty() { this.children = []; }
     remove() { this.removed = true; }
     addClass(...c) { this.classList.add(...c); }
@@ -146,6 +151,18 @@ class FakeDOMParser {
     }
 }
 
+// Records itself so a test can fire the callback the plugin registered.
+class FakeMutationObserver {
+    constructor(cb) {
+        this.cb = cb;
+        FakeMutationObserver.instances.push(this);
+    }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.disconnected = true; }
+    fire() { this.cb([], this); }
+}
+FakeMutationObserver.instances = [];
+
 // Installs the globals the plugin reaches for, and returns a restore function.
 function installDom() {
     const saved = {
@@ -165,11 +182,9 @@ function installDom() {
     };
     global.window = { innerHeight: 800, addEventListener() {} };
     global.Option = function Option(text, value) { return { text, value }; };
-    global.MutationObserver = class {
-        observe() {}
-        disconnect() {}
-    };
+    FakeMutationObserver.instances = [];
+    global.MutationObserver = FakeMutationObserver;
     return () => Object.assign(global, saved);
 }
 
-module.exports = { FakeEl, FakeDOMParser, installDom };
+module.exports = { FakeEl, FakeDOMParser, FakeMutationObserver, installDom };

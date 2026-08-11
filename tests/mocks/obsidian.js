@@ -59,6 +59,14 @@ class Modal {
     close() { if (this.onClose) this.onClose(); }
 }
 
+class FuzzySuggestModal extends Modal {
+    setPlaceholder() { return this; }
+    open() {
+        // Tests drive the choice directly; opening merely records the items.
+        this.items = this.getItems ? this.getItems() : [];
+    }
+}
+
 class Menu {
     addItem(cb) {
         if (cb) {
@@ -86,6 +94,6 @@ function setIcon() {}
 function debounce(fn) { return fn; }
 
 module.exports = {
-    Plugin, PluginSettingTab, Setting, Modal, Menu, MarkdownView, Notice,
+    Plugin, PluginSettingTab, Setting, Modal, FuzzySuggestModal, Menu, MarkdownView, Notice,
     setIcon, debounce, __notices: notices,
 };

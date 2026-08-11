@@ -104,6 +104,22 @@ Formatting rides on classes defined in `styles.css` (`tt-c` to centre a cell, `t
 
 An empty `<td>` contains no line box, so it collapses to the height of its padding — 19×9px against 75×30 for a filled cell, which makes a freshly inserted table nearly impossible to see or click into. Cells therefore carry a `min-width` (tunable with `--tt-cell-min-width`, default `3.5em`) and empty ones get a zero-width space from CSS, which gives them a normal text line's height. Nothing is written into the note, so there is no filler character to delete before you start typing.
 
+### Images in cells
+
+`![[image.png]]` does not work inside a table, and neither does `<img src="attachments/image.png">`. Markdown is not processed inside an HTML block, and Obsidian does not resolve vault-relative image sources — a [long-standing feature request](https://forum.obsidian.md/t/support-img-and-video-tag-with-src-relative-path-format/18647). Writing Obsidian's own `internal-embed` element by hand does not work either; that mechanism only fires for embeds Obsidian creates from its own syntax.
+
+So **Insert image into cell…** stores a readable vault path in an attribute of the plugin's own, and resolves it at render time:
+
+```html
+<td><img data-tt-src="attachments/Pasted image.png" alt="Pasted image.png"></td>
+```
+
+Pick from a fuzzy list of the vault's images and it is appended to the cell, leaving any text already there. The list is ordered so the one you want is usually at the top — images in the same folder as the note first, then most recently changed, which puts a file you just pasted or moved at the head. Typing filters on the whole path, so a folder name narrows it as well as a file name.
+
+Picking then asks for a **width in pixels**, pre-filled with whatever you used last, so an image arrives the size it should be rather than at whatever the original happens to measure. **Resize image in cell…** changes it afterwards, and an empty width restores the image's own size. The width rides on the standard `width` attribute, so the cell line stays short and the number is obvious when hand-editing — and the stylesheet still caps images at the cell width, so a value too large for the column shrinks rather than stretching the table. Images are capped at the cell width. If the file is later moved or deleted the cell says **Missing image: …** in a dashed outline, rather than rendering as nothing and quietly collapsing the row.
+
+Like the rest of the styling, this is Obsidian-only: other renderers see an `<img>` with no `src`.
+
 ### Borders
 
 Three dialogs, at three scopes, each offering the same thickness, line type (solid, dashed, dotted, double) and colour, with a live preview.

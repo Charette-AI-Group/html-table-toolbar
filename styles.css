@@ -12,12 +12,12 @@
        inactive, hence the multiplier; the cap stops a high setting from
        fading icons out completely. */
     --tt-dim: 14%;
-    /* Width the expanded strip wraps at. The full set runs ~970px in a single
-       row; two rows need at least ~588px, since below that the first row
-       cannot hold five groups and the trailing ⋯/× is pushed onto a third.
-       The margin above that is headroom for themes whose UI font makes the
-       group labels wider than the default. */
-    --tt-expanded-width: 680px;
+    /* Width the expanded strip wraps at. The full set runs well over 1100px in
+       a single row. At this width it splits six groups over four, both rows
+       leaving 70px or more spare — enough headroom for themes whose UI font
+       makes the group labels wider than the default. Drop much below 690px and
+       the trailing groups are pushed onto a third row. */
+    --tt-expanded-width: 760px;
     --tt-fade: min(calc(var(--tt-dim) * 3), 70%);
     --tt-faded: color-mix(in srgb, var(--text-normal), var(--background-secondary) var(--tt-fade));
     position: fixed;
@@ -702,6 +702,26 @@ table.tt-table:has(:is(th, td):last-child.tt-cr) {
 table.tt-table th {
     background: var(--background-secondary);
     font-weight: 600;
+}
+
+/* An image must not force a column wider than the cell it is in. */
+table.tt-table :is(th, td) img {
+    max-width: 100%;
+    height: auto;
+    vertical-align: top;
+}
+
+/* An <img> whose file cannot be found renders as nothing and takes the row's
+   height down with it, which reads as the plugin having done nothing at all.
+   Say what is missing instead. */
+table.tt-table :is(th, td) img.tt-img-missing {
+    display: inline-block;
+    min-width: 8em;
+    padding: 4px 8px;
+    border: 1px dashed var(--text-error, #e03131);
+    border-radius: 4px;
+    color: var(--text-error, #e03131);
+    font-size: var(--font-ui-smaller);
 }
 
 /* Table-level alignment. The one clear win over pipe tables, and it is just

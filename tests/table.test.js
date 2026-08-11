@@ -24,6 +24,8 @@ const {
     setRowBorder, rowEdges, rowLineFormat, setColumnBorder, columnEdges, columnLineFormat,
     buildTableLines, stampMarker, parseAttrs, attrsToString, getAttr, cellMarker, diagnose,
     parseColor, toRgba, sameColor, isColorish, isLengthish, DEFAULT_CELL_SHADES,
+    imageMarkup, resolveImages, imageChoices, IMG_ATTR,
+    imageWidth, setImageWidth, currentImageWidth,
 } = plugin.__internals;
 
 // --- helpers ---------------------------------------------------------------
@@ -504,6 +506,147 @@ test('borders coexist with table alignment on the same element', () => {
     assert.match(open, /tt-rules/);
     assert.match(open, /--tt-line-width:2px/);
     assert.match(open, /--tt-line-style:dashed/);
+});
+
+// --- images in cells ---------------------------------------------------------
+
+// A stand-in for the handful of element methods resolveImages touches.
+function fakeImg(attrs) {
+    return {
+        attrs: Object.assign({}, attrs),
+        classes: new Set(),
+        getAttribute(n) { return Object.prototype.hasOwnProperty.call(this.attrs, n) ? this.attrs[n] : null; },
+        setAttribute(n, v) { this.attrs[n] = v; },
+        removeAttribute(n) { delete this.attrs[n]; },
+        addClass(c) { this.classes.add(c); },
+        removeClass(c) { this.classes.delete(c); },
+    };
+}
+
+function fakeRoot(imgs) {
+    return { querySelectorAll: () => imgs };
+}
+
+test('a stored vault path is turned into a real source', () => {
+    const img = fakeImg({ 'data-tt-src': 'attachments/shot.png', alt: 'shot.png' });
+    const n = resolveImages(fakeRoot([img]), (link) => 'app://resolved/' + link);
+    assert.equal(n, 1);
+    assert.equal(img.getAttribute('src'), 'app://resolved/attachments/shot.png');
+    assert.equal(img.classes.has('tt-img-missing'), false);
+});
+
+test('an image that cannot be found says so instead of vanishing', () => {
+    const img = fakeImg({ 'data-tt-src': 'gone.png' });
+    resolveImages(fakeRoot([img]), () => null);
+    assert.equal(img.getAttribute('src'), null, 'no broken src is left behind');
+    assert.equal(img.classes.has('tt-img-missing'), true);
+    assert.match(img.getAttribute('alt'), /Missing image: gone\.png/);
+});
+
+test('resolving twice recovers an image that has come back', () => {
+    const img = fakeImg({ 'data-tt-src': 'later.png' });
+    resolveImages(fakeRoot([img]), () => null);
+    assert.equal(img.classes.has('tt-img-missing'), true);
+    resolveImages(fakeRoot([img]), (l) => 'app://resolved/' + l);
+    assert.equal(img.classes.has('tt-img-missing'), false, 'the warning class is cleared');
+    assert.equal(img.getAttribute('src'), 'app://resolved/later.png');
+});
+
+function vaultFile(path, mtime) {
+    return { path, extension: path.split('.').pop(), stat: { mtime: mtime || 0 } };
+}
+
+test('the image list keeps only images, and a good range of them', () => {
+    const files = [
+        vaultFile('a.png'), vaultFile('b.JPG'), vaultFile('c.jpeg'), vaultFile('d.jfif'),
+        vaultFile('e.webp'), vaultFile('f.avif'), vaultFile('g.svg'), vaultFile('h.tiff'),
+        vaultFile('i.heic'), vaultFile('note.md'), vaultFile('sheet.xlsx'), vaultFile('clip.mp4'),
+    ];
+    const got = imageChoices(files, '').map((f) => f.path);
+    assert.equal(got.includes('note.md'), false);
+    assert.equal(got.includes('sheet.xlsx'), false);
+    assert.equal(got.includes('clip.mp4'), false);
+    for (const want of ['b.JPG', 'd.jfif', 'h.tiff', 'i.heic']) {
+        assert.ok(got.includes(want), want + ' should count as an image');
+    }
+});
+
+test('images beside the note come first, then the most recently changed', () => {
+    const files = [
+        vaultFile('Archive/old.png', 100),
+        vaultFile('Finance/Retirement/docs/chart.png', 50),
+        vaultFile('Archive/newer.png', 900),
+        vaultFile('Finance/Retirement/docs/photo.png', 80),
+    ];
+    const got = imageChoices(files, 'Finance/Retirement/docs/Plan.md').map((f) => f.path);
+    assert.deepEqual(got, [
+        // the note's own folder first, newest of those first
+        'Finance/Retirement/docs/photo.png',
+        'Finance/Retirement/docs/chart.png',
+        // then everything else, newest first
+        'Archive/newer.png',
+        'Archive/old.png',
+    ]);
+});
+
+test('with no note path the list is simply newest first', () => {
+    const files = [vaultFile('a.png', 10), vaultFile('b.png', 30), vaultFile('c.png', 20)];
+    assert.deepEqual(imageChoices(files, '').map((f) => f.path), ['b.png', 'c.png', 'a.png']);
+});
+
+test('image markup keeps the path readable and carries a sensible alt', () => {
+    assert.equal(
+        imageMarkup('attachments/Pasted image 20260811080005.png'),
+        '<img data-tt-src="attachments/Pasted image 20260811080005.png" alt="Pasted image 20260811080005.png">'
+    );
+    assert.equal(IMG_ATTR, 'data-tt-src');
+});
+
+test('a width is written as the HTML attribute, and only when sensible', () => {
+    assert.match(imageMarkup('a/shot.png', 300), / width="300">$/);
+    assert.match(imageMarkup('a/shot.png', '300px'), / width="300">$/, 'a unit is tolerated');
+    for (const junk of ['', null, undefined, '0', '-40', 'wide']) {
+        assert.doesNotMatch(imageMarkup('a/shot.png', junk), /width=/, JSON.stringify(junk));
+    }
+    assert.equal(imageWidth('  240  '), '240');
+});
+
+test('resizing rewrites the image in a cell and can clear the width again', () => {
+    const model = parsed(['a|b']);
+    model.rows[0].cells[0].content = 'Before ' + imageMarkup('a/shot.png', 300) + ' after';
+    assert.equal(currentImageWidth(model, 0, 0), '300');
+
+    setImageWidth(model, 0, 0, 120);
+    assert.match(model.rows[0].cells[0].content, /width="120"/);
+    assert.equal((model.rows[0].cells[0].content.match(/width=/g) || []).length, 1,
+        'the old width is replaced, not duplicated');
+    assert.match(model.rows[0].cells[0].content, /^Before <img[\s\S]*> after$/, 'text is untouched');
+
+    setImageWidth(model, 0, 0, '');
+    assert.doesNotMatch(model.rows[0].cells[0].content, /width=/, 'back to its natural size');
+    assert.equal(currentImageWidth(model, 0, 0), '');
+});
+
+test('resizing covers every image in the cell, and says so when there is none', () => {
+    const model = parsed(['a|b']);
+    model.rows[0].cells[0].content = imageMarkup('a/one.png') + '<br>' + imageMarkup('a/two.png', 500);
+    setImageWidth(model, 0, 0, 200);
+    assert.equal((model.rows[0].cells[0].content.match(/width="200"/g) || []).length, 2);
+    assert.throws(() => setImageWidth(model, 0, 1, 200), /no image in this cell/);
+});
+
+test('an image in a cell survives the parser and a round trip', () => {
+    const lines = [
+        '<table>',
+        '<tr>',
+        '<td>Before ' + imageMarkup('attachments/shot.png') + ' after</td>',
+        '</tr>',
+        '</table>',
+    ];
+    const model = parseTable(lines);
+    assert.ok(model, 'a cell holding an image still parses');
+    assert.match(model.rows[0].cells[0].content, /data-tt-src="attachments\/shot\.png"/);
+    assert.deepEqual(serializeTable(model), lines);
 });
 
 // --- diagnosing an unreadable table ------------------------------------------

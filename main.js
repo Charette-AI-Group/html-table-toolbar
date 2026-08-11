@@ -1,7 +1,8 @@
 'use strict';
 
 const {
-    Plugin, PluginSettingTab, Setting, Modal, Menu, Notice, MarkdownView, setIcon, debounce,
+    Plugin, PluginSettingTab, Setting, Modal, Menu, Notice, MarkdownView, FuzzySuggestModal,
+    setIcon, debounce,
 } = require('obsidian');
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1276,95 @@ function paintSwatch(el, color) {
     el.style.backgroundImage = color ? 'linear-gradient(' + color + ', ' + color + ')' : '';
 }
 
+// Images in cells
+// ---------------------------------------------------------------------------
+// Obsidian resolves ![[image.png]] only for embeds it creates itself; a
+// wikilink written inside an HTML block is never processed, and neither a
+// vault-relative <img src> nor a hand-written internal-embed element is
+// resolved either. So the note stores a readable vault path in an attribute of
+// our own, and the plugin turns it into a real source at render time.
+const IMG_ATTR = 'data-tt-src';
+
+const IMAGE_EXT = /^(?:png|jpe?g|jfif|gif|webp|avif|svg|bmp|ico|tiff?|heic|heif)$/i;
+
+// A vault's images, ordered so the one being looked for is usually near the
+// top: those beside the note first, then most recently changed — which puts a
+// just-pasted or just-moved file at the head of the list.
+function imageChoices(files, sourcePath) {
+    const cut = sourcePath ? sourcePath.lastIndexOf('/') : -1;
+    const folder = cut >= 0 ? sourcePath.slice(0, cut + 1) : '';
+    const near = (f) => (folder && f.path.startsWith(folder) ? 0 : 1);
+    const when = (f) => (f.stat && f.stat.mtime) || 0;
+    return files
+        .filter((f) => IMAGE_EXT.test(f.extension || ''))
+        .sort((a, b) => near(a) - near(b) || when(b) - when(a) || a.path.localeCompare(b.path));
+}
+
+// Width goes on the standard HTML attribute rather than an inline style, so
+// the cell line stays short and the number is obvious when hand-editing. The
+// stylesheet still caps it at the cell width, so a value too large for the
+// column shrinks rather than forcing the table wider.
+function imageWidth(value) {
+    const n = parseInt(String(value || '').trim(), 10);
+    return Number.isFinite(n) && n > 0 ? String(n) : '';
+}
+
+function imageMarkup(path, width) {
+    const name = path.split('/').pop();
+    const w = imageWidth(width);
+    return '<img ' + IMG_ATTR + '="' + path + '" alt="' + name + '"'
+        + (w ? ' width="' + w + '"' : '') + '>';
+}
+
+// Resize every image in one cell. An empty width removes the attribute, which
+// puts the image back to its natural size.
+function setImageWidth(model, r, ci, width) {
+    const cell = needCell(model, r, ci);
+    const w = imageWidth(width);
+    let found = 0;
+    cell.content = cell.content.replace(/<img\b[^>]*>/gi, (tag) => {
+        found++;
+        const bare = tag.replace(/\s+width\s*=\s*"[^"]*"/gi, '');
+        return w ? bare.replace(/\s*\/?>$/, ' width="' + w + '">') : bare;
+    });
+    if (!found) fail('There is no image in this cell.');
+    return { row: r, cell: ci };
+}
+
+// The width already on the first image in a cell, if any.
+function currentImageWidth(model, r, ci) {
+    const cell = model.rows[r] && model.rows[r].cells[ci];
+    if (!cell) return '';
+    const tag = /<img\b[^>]*>/i.exec(cell.content);
+    if (!tag) return '';
+    const w = /\swidth\s*=\s*"([^"]*)"/i.exec(tag[0]);
+    return w ? w[1] : '';
+}
+
+// `resolve` maps a vault path to something usable as a src, or null when the
+// file cannot be found. Kept separate from Obsidian so it can be tested.
+function resolveImages(root, resolve, selector) {
+    let done = 0;
+    const sel = selector || 'img[' + IMG_ATTR + ']';
+    for (const img of Array.from(root.querySelectorAll(sel))) {
+        const link = img.getAttribute(IMG_ATTR);
+        if (!link) continue;
+        const src = resolve(link);
+        if (src) {
+            img.setAttribute('src', src);
+            img.removeClass ? img.removeClass('tt-img-missing') : null;
+        } else {
+            // Say so rather than leaving an empty element, which renders as
+            // nothing at all and collapses the row it sits in.
+            img.removeAttribute('src');
+            if (img.addClass) img.addClass('tt-img-missing');
+            img.setAttribute('alt', 'Missing image: ' + link);
+        }
+        done++;
+    }
+    return done;
+}
+
 function stripTags(html) {
     return html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
 }
@@ -1306,6 +1396,7 @@ const DEFAULT_SETTINGS = {
     // cells or columns is one click each.
     lastCellShade: '',
     lastColumnWidth: '',
+    lastImageWidth: '300',
 };
 
 module.exports = class HtmlTableToolbarPlugin extends Plugin {
@@ -1314,7 +1405,14 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         this.app.workspace.onLayoutReady(() => {
             this.buildToolbar();
             this.watchNeighbour();
+            this.watchImages();
             this.updateContext();
+        });
+
+        // Runs over every rendered block, in Reading mode and Live Preview
+        // alike, turning the stored vault path into a real source.
+        this.registerMarkdownPostProcessor((el, ctx) => {
+            resolveImages(el, this.imageResolver(ctx && ctx.sourcePath));
         });
 
         this.addRibbonIcon('table', 'Toggle HTML table toolbar', () => this.toggleToolbar());
@@ -1651,12 +1749,60 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
                 : '';
         }
         if (this.markerBtn) this.markerBtn.classList.toggle('tt-on', !!this.settings.rowMarkers);
+        this.sweepImages();
 
         if (!this.toolbar) return;
         const show = this.settings.visible && (!this.settings.contextual || inTable);
         this.toolbar.classList.toggle('tt-hidden', !show);
         this.toolbar.classList.toggle('tt-inactive', !inTable);
         this.positionBar();
+    }
+
+    // The link resolver, shared by the post-processor and the sweep below.
+    imageResolver(sourcePath) {
+        return (link) => {
+            const cache = this.app.metadataCache;
+            const file = cache && cache.getFirstLinkpathDest(link, sourcePath || '');
+            return file ? this.app.vault.getResourcePath(file) : null;
+        };
+    }
+
+    // A safety net for images the post-processor never reached. Markdown post-
+    // processors are the documented hook, but raw HTML blocks are not reliably
+    // handed to them — Obsidian's own embed resolution does not reach markup
+    // written by hand either — so anything still lacking a src gets picked up
+    // here on the next cursor move or edit. Scoped to unresolved images, so a
+    // page of already-working ones costs a single querySelectorAll.
+    sweepImages() {
+        if (typeof document === 'undefined') return 0;
+        const root = document.querySelector('.workspace') || document.body;
+        if (!root) return 0;
+        const active = this.app.workspace.getActiveFile && this.app.workspace.getActiveFile();
+        return resolveImages(
+            root,
+            this.imageResolver(active && active.path),
+            'img[' + IMG_ATTR + ']:not([src])'
+        );
+    }
+
+    // Sweeping on cursor and edit events alone loses a race: leaving a table
+    // makes Obsidian re-render the block into fresh DOM, and that happens
+    // AFTER the debounced sweep has already run — so the new <img> sat without
+    // a source until the next click. Watching for the DOM actually changing
+    // removes the guesswork.
+    //
+    // childList only, and the handler merely schedules: the work is one
+    // selector for unresolved images, which is nothing when there are none.
+    // Setting src is an attribute change, so the fix cannot retrigger this.
+    watchImages() {
+        if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return;
+        const root = document.querySelector('.workspace') || document.body;
+        if (!root) return;
+        const run = debounce(() => this.sweepImages(), 50, true);
+        const observer = new MutationObserver(() => run());
+        observer.observe(root, { childList: true, subtree: true });
+        this.register(() => observer.disconnect());
+        this.sweepImages();
     }
 
     applyDim() {
@@ -1757,6 +1903,8 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
             { id: 'table-align-left', name: 'Align table left', run: () => this.runOp((m) => setTableAlign(m, 'left')) },
             { id: 'table-align-center', name: 'Center table', run: () => this.runOp((m) => setTableAlign(m, 'center')) },
             { id: 'table-align-right', name: 'Align table right', run: () => this.runOp((m) => setTableAlign(m, 'right')) },
+            { id: 'insert-image', name: 'Insert image into cell…', run: () => this.promptInsertImage() },
+            { id: 'image-width', name: 'Resize image in cell…', run: () => this.promptImageWidth() },
             { id: 'table-borders', name: 'Table borders…', run: () => this.promptTableBorders() },
             { id: 'row-borders', name: 'Row borders…', run: () => this.promptRowBorders() },
             { id: 'column-borders', name: 'Column borders…', run: () => this.promptColumnBorders() },
@@ -1846,12 +1994,10 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         if (!ed) { new Notice('Open a note in editing mode first'); return; }
         // No repair pass here, unlike every other operation: reformatting
         // rewrites the block, and the selection this depends on would not
-        // survive it. Better to say so than to discard what was selected.
-        const loc = this.locate(ed, false);
-        if (!loc) {
-            new Notice('Put the cursor inside an HTML table first (run "Reformat table" if one is there).');
-            return;
-        }
+        // survive it. Better to say precisely what is wrong than to discard
+        // what was selected.
+        const loc = this.cellTarget(false);
+        if (!loc) return;
         const rect = this.selectionRect(ed, loc);
         if (!rect) { new Notice('Could not tell which cells are selected.'); return; }
         if (rect.single) {
@@ -1862,10 +2008,8 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
     }
 
     promptColumnWidth() {
-        const ed = this.getEditor();
-        if (!ed) { new Notice('Open a note in editing mode first'); return; }
-        const loc = this.locate(ed, false);
-        if (!loc) { new Notice('Put the cursor inside an HTML table first'); return; }
+        const loc = this.cellTarget(false);
+        if (!loc) return;
         const col = columnOfCell(loc.model, loc.row, loc.cell);
         const current = loc.model.cols && loc.model.cols[col]
             ? (/width\s*:\s*([^;]+)/i.exec(getAttr(loc.model.cols[col], 'style') || '') || [])[1] || ''
@@ -1890,12 +2034,31 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         }).open();
     }
 
-    borderTarget() {
+    // Shared by every dialog. A flat "put the cursor in a table" is misleading
+    // when the cursor IS in one that simply cannot be read — so when a table
+    // is there but unreadable, say which line and why, the same way the status
+    // bar does. The dialogs deliberately do not repair on the way in: that
+    // would rewrite the note before anything had been chosen.
+    cellTarget(needsCell) {
         const ed = this.getEditor();
         if (!ed) { new Notice('Open a note in editing mode first'); return null; }
         const loc = this.locate(ed, false);
-        if (!loc) { new Notice('Put the cursor inside an HTML table first'); return null; }
-        return loc;
+        if (loc && (!needsCell || loc.cell >= 0)) return loc;
+        if (loc) {
+            new Notice('Put the cursor in a table cell first — this row is covered by a merge.');
+            return null;
+        }
+        const block = this.findTableBlock(ed, ed.getCursor('from').line);
+        const problem = block && diagnose(this.blockText(ed, block), block.start);
+        new Notice(problem
+            ? 'This table cannot be read — line ' + (problem.line + 1) + ': ' + problem.why
+                + '. Click the warning in the status bar, or run Reformat table, then try again.'
+            : 'Put the cursor inside an HTML table first');
+        return null;
+    }
+
+    borderTarget() {
+        return this.cellTarget(false);
     }
 
     promptTableBorders() {
@@ -1947,11 +2110,64 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         ), (v) => this.runOp((m) => setColumnBorder(m, v.index, v.edges, v))).open();
     }
 
+    promptInsertImage() {
+        const loc = this.cellTarget(true);
+        if (!loc) return;
+        const active = this.app.workspace.getActiveFile && this.app.workspace.getActiveFile();
+        const images = imageChoices(this.app.vault.getFiles(), active ? active.path : '');
+        if (!images.length) { new Notice('No images found in this vault'); return; }
+        new ImagePickerModal(this.app, images, (file) => {
+            // Width is asked for at the moment of inserting, pre-filled with
+            // whatever was used last, so an image arrives the size it should be
+            // rather than at whatever the original happens to measure.
+            new TextPromptModal(this.app, {
+                title: 'Width for ' + file.path.split('/').pop(),
+                desc: 'Width in pixels — 300 is a good starting point for a table cell.',
+                hint: 'Leave empty for the image\'s own size. It is capped at the cell width either way, so a value too large for the column shrinks instead of stretching the table.',
+                value: this.settings.lastImageWidth || '',
+                placeholder: '300',
+                onSubmit: (v) => {
+                    const width = imageWidth(v);
+                    this.settings.lastImageWidth = width;
+                    this.saveSettings();
+                    this.runOp((m, l) => {
+                        const cell = needCell(m, l.row, l.cell);
+                        // Appended, so it joins whatever text is already there
+                        // rather than replacing it.
+                        cell.content += imageMarkup(file.path, width);
+                        return { row: l.row, cell: l.cell };
+                    });
+                },
+            }).open();
+        }).open();
+    }
+
+    promptImageWidth() {
+        const loc = this.cellTarget(true);
+        if (!loc) return;
+        const current = currentImageWidth(loc.model, loc.row, loc.cell);
+        if (!current && !/<img\b/i.test(loc.model.rows[loc.row].cells[loc.cell].content)) {
+            new Notice('There is no image in this cell.');
+            return;
+        }
+        new TextPromptModal(this.app, {
+            title: 'Image width',
+            desc: 'Width in pixels for the image in this cell.',
+            hint: 'Leave empty for the image\'s own size.',
+            value: current || this.settings.lastImageWidth || '',
+            placeholder: '300',
+            onSubmit: (v) => {
+                const width = imageWidth(v);
+                this.settings.lastImageWidth = width;
+                this.saveSettings();
+                this.runOp((m, l) => setImageWidth(m, l.row, l.cell, width));
+            },
+        }).open();
+    }
+
     promptCellBackground() {
-        const ed = this.getEditor();
-        if (!ed) { new Notice('Open a note in editing mode first'); return; }
-        const loc = this.locate(ed, false);
-        if (!loc || loc.cell < 0) { new Notice('Put the cursor inside a table cell first'); return; }
+        const loc = this.cellTarget(true);
+        if (!loc) return;
         const style = getAttr(loc.model.rows[loc.row].cells[loc.cell].attrs, 'style') || '';
         const found = /background(?:-color)?\s*:\s*([^;]+)/i.exec(style);
         new CellShadeModal(this, found ? found[1].trim() : '', (v) => {
@@ -2067,6 +2283,8 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         mkBtn(g, 'Set column width…', 'move-horizontal', '↔', () => this.promptColumnWidth());
         mkBtn(g, 'Reformat table', 'wand', '↻', () => this.reformatTable());
         mkBtn(g, 'Set cell background…', 'paintbrush', '▨', () => this.promptCellBackground());
+        mkBtn(g, 'Insert image into cell…', 'image', '🖼', () => this.promptInsertImage());
+        mkBtn(g, 'Resize image in cell…', 'scaling', '⤢', () => this.promptImageWidth());
         // A mode rather than an action, so it carries its state as a pressed
         // look — the same thing the menu says with a tick.
         this.markerBtn = mkBtn(g, 'Row and column markers in source', 'hash', '#', () => this.toggleMarkers());
@@ -2116,6 +2334,8 @@ module.exports = class HtmlTableToolbarPlugin extends Plugin {
         item('Center table', 'align-center', op((m) => setTableAlign(m, 'center')));
         item('Align table right', 'align-right', op((m) => setTableAlign(m, 'right')));
         menu.addSeparator();
+        item('Insert image into cell…', 'image', () => this.promptInsertImage());
+        item('Resize image in cell…', 'scaling', () => this.promptImageWidth());
         item('Table borders…', 'grid-3x3', () => this.promptTableBorders());
         item('Row borders…', 'rows-3', () => this.promptRowBorders());
         item('Column borders…', 'columns-3', () => this.promptColumnBorders());
@@ -2160,7 +2380,8 @@ module.exports.__internals = {
     setCellBackground, buildTableLines, stampMarker, parseAttrs, attrsToString,
     getAttr, setAttr, getClasses, canonicalize, cellMarker,
     parseColor, toRgba, sameColor, isColorish, isLengthish, DEFAULT_CELL_SHADES,
-    resolveEndpoint, diagnose,
+    resolveEndpoint, diagnose, imageMarkup, resolveImages, imageChoices, IMG_ATTR,
+    imageWidth, setImageWidth, currentImageWidth,
 };
 
 // ---------------------------------------------------------------------------
@@ -2619,6 +2840,19 @@ class CellShadeModal extends Modal {
     onClose() {
         this.contentEl.empty();
     }
+}
+
+// Fuzzy picker over the vault's images, so nobody has to remember a path.
+class ImagePickerModal extends FuzzySuggestModal {
+    constructor(app, files, onChoose) {
+        super(app);
+        this.files = files;
+        this.onChoose = onChoose;
+        this.setPlaceholder('Type part of the name or folder — nearest and newest first');
+    }
+    getItems() { return this.files; }
+    getItemText(file) { return file.path; }
+    onChooseItem(file) { this.onChoose(file); }
 }
 
 class TextPromptModal extends Modal {

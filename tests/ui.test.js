@@ -73,8 +73,21 @@ function makePlugin(editor) {
         cellShades: plugin.__internals.DEFAULT_CELL_SHADES,
         lastCellShade: '',
         lastColumnWidth: '',
+        lastImageWidth: '300',
     });
-    p.app = { setting: null };
+    p.app = {
+        setting: null,
+        vault: {
+            getFiles: () => [
+                { path: 'attachments/shot.png', extension: 'png', stat: { mtime: 10 } },
+                { path: 'Finance/Retirement/docs/chart.png', extension: 'png', stat: { mtime: 20 } },
+                { path: 'notes/readme.md', extension: 'md', stat: { mtime: 30 } },
+            ],
+            getResourcePath: (f) => 'app://resolved/' + f.path,
+        },
+        metadataCache: { getFirstLinkpathDest: () => null },
+        workspace: { getActiveFile: () => ({ path: 'Finance/Retirement/docs/Plan.md' }) },
+    };
     p.manifest = { id: 'html-table-toolbar' };
     p.getEditor = () => editor;
     p.saveSettings = () => {};
@@ -308,15 +321,20 @@ test('a repair keeps the caret near the cell it was in, not at the first', () =>
 // outside without widening the plugin's exports just for tests.
 function captureModals(fn) {
     const opened = [];
-    const original = obsidian.Modal.prototype.open;
-    obsidian.Modal.prototype.open = function open() {
-        opened.push(this);
-        return original.call(this);
-    };
+    // Both, because FuzzySuggestModal overrides open() and would otherwise
+    // slip past a patch on Modal alone.
+    const targets = [obsidian.Modal.prototype, obsidian.FuzzySuggestModal.prototype];
+    const originals = targets.map((p) => p.open);
+    targets.forEach((proto, i) => {
+        proto.open = function open() {
+            opened.push(this);
+            return originals[i].call(this);
+        };
+    });
     try {
         fn();
     } finally {
-        obsidian.Modal.prototype.open = original;
+        targets.forEach((proto, i) => { proto.open = originals[i]; });
     }
     return opened;
 }
@@ -343,6 +361,164 @@ test('the insert-table button opens the grid picker, and picking a size inserts'
         assert.match(out, /<table class="tt-table" data-tt="1">/);
         assert.equal((out.match(/<tr>/g) || []).length, 3);
         assert.equal((out.match(/<th><\/th>/g) || []).length, 2, 'header row of two');
+    } finally {
+        restore();
+    }
+});
+
+test('the image picker offers only images, and writes the chosen one into the cell', () => {
+    const restore = installDom();
+    try {
+        const ed = new MockEditor(TABLE, IN_CELL);
+        const p = makePlugin(ed);
+        const opened = captureModals(() => p.promptInsertImage());
+        assert.equal(opened.length, 1, 'the picker opened');
+
+        const picker = opened[0];
+        const items = picker.getItems();
+        assert.deepEqual(items.map((f) => f.path), [
+            // the note's own folder first, whatever the modification times say
+            'Finance/Retirement/docs/chart.png',
+            'attachments/shot.png',
+        ], 'images beside the note lead, and the markdown file is not offered');
+        assert.equal(picker.getItemText(items[0]), 'Finance/Retirement/docs/chart.png',
+            'the full path is the search text, so typing a folder narrows the list');
+
+        // choosing leads to the width prompt, pre-filled with the last used
+        const prompts = captureModals(() => picker.onChooseItem(items[0]));
+        assert.equal(prompts.length, 1, 'the width prompt follows the picker');
+        assert.equal(prompts[0].opts.value, '300', 'pre-filled with the remembered width');
+
+        prompts[0].opts.onSubmit('240');
+        assert.match(
+            ed.getValue(),
+            /<td>Design review<img data-tt-src="Finance\/Retirement\/docs\/chart\.png" alt="chart\.png" width="240"><\/td>/,
+            'appended at the chosen width, leaving the text that was already there'
+        );
+        assert.ok(
+            plugin.__internals.parseTable(ed.getValue().split('\n').slice(2, 12)),
+            'and the table still parses'
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('inserting an image needs the cursor in a table', () => {
+    const restore = installDom();
+    obsidian.__notices.length = 0;
+    try {
+        const ed = new MockEditor(TABLE, { line: 0, ch: 3 });
+        const opened = captureModals(() => makePlugin(ed).promptInsertImage());
+        assert.equal(opened.length, 0, 'no picker outside a table');
+        assert.equal(obsidian.__notices.some((n) => /inside an HTML table first/.test(n)), true);
+    } finally {
+        restore();
+    }
+});
+
+test('a dialog on an unreadable table names the line instead of blaming the cursor', () => {
+    const restore = installDom();
+    try {
+        // a blank line after <tr>, which is what ends the HTML block
+        const broken = TABLE.replace('<tr>\n<td>Design review', '<tr>\n\n<td>Design review');
+        for (const method of ['promptInsertImage', 'promptCellBackground', 'promptColumnWidth', 'promptTableBorders']) {
+            obsidian.__notices.length = 0;
+            const ed = new MockEditor(broken, { line: 9, ch: 4 });
+            const opened = captureModals(() => makePlugin(ed)[method]());
+            assert.equal(opened.length, 0, method + ' should not open on an unreadable table');
+            const said = obsidian.__notices.join(' | ');
+            assert.match(said, /cannot be read — line 9/, method + ' should name the line, got: ' + said);
+            assert.match(said, /blank line ends the table/, method + ' should give the reason');
+            assert.doesNotMatch(said, /Put the cursor/, method + ' should not blame the cursor');
+        }
+    } finally {
+        restore();
+    }
+});
+
+test('the sweep resolves images the post-processor never reached', () => {
+    const restore = installDom();
+    try {
+        const { FakeEl } = require('./mocks/dom.js');
+        const p = makePlugin(new MockEditor(TABLE, IN_CELL));
+        p.app.metadataCache.getFirstLinkpathDest = (link) => ({ path: link });
+
+        const unresolved = new FakeEl('img');
+        unresolved.setAttribute('data-tt-src', 'Finance/Retirement/docs/chart.png');
+        const workspace = new FakeEl('div');
+        workspace.classes.add('workspace');
+        // only images without a src are collected, so working ones cost nothing
+        workspace.querySelectorAll = (sel) => (/:not\(\[src\]\)/.test(sel) ? [unresolved] : []);
+        global.document.querySelector = (sel) => (sel === '.workspace' ? workspace : null);
+
+        assert.equal(p.sweepImages(), 1, 'one image was picked up');
+        assert.equal(
+            unresolved.getAttribute('src'),
+            'app://resolved/Finance/Retirement/docs/chart.png'
+        );
+    } finally {
+        restore();
+    }
+});
+
+test('a re-rendered image is resolved as soon as the DOM changes', () => {
+    const restore = installDom();
+    try {
+        const { FakeEl, FakeMutationObserver } = require('./mocks/dom.js');
+        const p = makePlugin(new MockEditor(TABLE, IN_CELL));
+        p.app.metadataCache.getFirstLinkpathDest = (link) => ({ path: link });
+
+        const workspace = new FakeEl('div');
+        let live = [];
+        workspace.querySelectorAll = (sel) => (/:not\(\[src\]\)/.test(sel) ? live : []);
+        global.document.querySelector = (sel) => (sel === '.workspace' ? workspace : null);
+
+        p.watchImages();
+        const observer = FakeMutationObserver.instances.find((o) => o.target === workspace);
+        assert.ok(observer, 'the workspace is being watched');
+        assert.equal(observer.options.childList && observer.options.subtree, true);
+
+        // Obsidian re-renders the block: a brand-new img appears with no src,
+        // which is exactly the state that used to persist until the next click
+        const fresh = new FakeEl('img');
+        fresh.setAttribute('data-tt-src', 'docs/chart.png');
+        live = [fresh];
+
+        observer.fire();
+        assert.equal(fresh.getAttribute('src'), 'app://resolved/docs/chart.png',
+            'resolved without waiting for another click');
+    } finally {
+        restore();
+    }
+});
+
+test('watching stops when the plugin unloads', () => {
+    const restore = installDom();
+    try {
+        const { FakeEl, FakeMutationObserver } = require('./mocks/dom.js');
+        const p = makePlugin(new MockEditor(TABLE, IN_CELL));
+        const cleanups = [];
+        p.register = (fn) => cleanups.push(fn);
+        const workspace = new FakeEl('div');
+        workspace.querySelectorAll = () => [];
+        global.document.querySelector = (sel) => (sel === '.workspace' ? workspace : null);
+
+        p.watchImages();
+        const observer = FakeMutationObserver.instances.find((o) => o.target === workspace);
+        cleanups.forEach((fn) => fn());
+        assert.equal(observer.disconnected, true, 'the observer is disconnected on unload');
+    } finally {
+        restore();
+    }
+});
+
+test('the sweep is harmless when there is nothing to do', () => {
+    const restore = installDom();
+    try {
+        const p = makePlugin(new MockEditor(TABLE, IN_CELL));
+        global.document.querySelector = () => null;
+        assert.equal(p.sweepImages(), 0, 'no workspace, no work, no throw');
     } finally {
         restore();
     }

@@ -1135,6 +1135,10 @@ function modelFromElement(table) {
             row.cells.push({
                 tag: td.tagName.toLowerCase(),
                 attrs: Array.from(td.attributes).map((a) => ({ name: a.name, value: a.value })),
+                // Markers are generated, and innerHTML hands them back as part
+                // of the content — so without stripping them here a reformat
+                // prepends a second one to the one already there. The fast
+                // parser has always done this; the repair path had not.
                 // A blank line inside an HTML block terminates it under
                 // CommonMark, so a paragraph break cannot survive as one and
                 // becomes two <br>. An ordinary wrap can survive, and is left
@@ -1142,6 +1146,7 @@ function modelFromElement(table) {
                 // indentation around the content does not become stray breaks.
                 content: td.innerHTML
                     .trim()
+                    .replace(RE_CELL_MARKER, '')
                     .replace(/[ \t]*\r?\n[ \t]*\r?\n\s*/g, '<br><br>'),
             });
         }

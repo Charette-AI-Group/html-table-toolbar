@@ -339,6 +339,69 @@ test('Reformat table fixes a paragraph break, on the real-world shape', () => {
     }
 });
 
+// Markers are generated, and the repair path reads cell content back out of
+// innerHTML — comments included — so it has to strip them or it stacks a new
+// one on top of the old.
+const MARKED_BROKEN = [
+    '<table class="tt-table" data-tt="1">',
+    '<tr>',
+    '<th><!-- r01c01 -->Task</th>',
+    '<th><!-- r01c02 -->Owner</th>',
+    '</tr>',
+    '<tr>',
+    '',
+    '<td><!-- r02c01 -->Design review</td>',
+    '<td><!-- r02c02 -->Alice</td>',
+    '</tr>',
+    '</table>',
+    '',
+].join('\n');
+
+test('reformatting a marked table does not duplicate the markers', () => {
+    const restore = installDom();
+    try {
+        const ed = new MockEditor(MARKED_BROKEN, { line: 2, ch: 20 });
+        const p = makePlugin(ed, { rowMarkers: true });
+        p.reformatTable();
+
+        const out = ed.getValue();
+        assert.equal((out.match(/<!--/g) || []).length, 4, 'one marker per cell, not two');
+        assert.equal(out.includes('<!-- r01c01 --><!-- r01c01 -->'), false, 'no stacking');
+        assert.match(out, /<th><!-- r01c01 -->Task<\/th>/);
+        assert.match(out, /<td><!-- r02c01 -->Design review<\/td>/);
+    } finally {
+        restore();
+    }
+});
+
+test('reformatting repeatedly never accumulates markers', () => {
+    const restore = installDom();
+    try {
+        const ed = new MockEditor(MARKED_BROKEN, { line: 2, ch: 20 });
+        const p = makePlugin(ed, { rowMarkers: true });
+        p.reformatTable();
+        const once = ed.getValue();
+        p.reformatTable();
+        p.reformatTable();
+        assert.equal(ed.getValue(), once, 'reformatting is idempotent');
+    } finally {
+        restore();
+    }
+});
+
+test('reformatting with markers off strips the ones already there', () => {
+    const restore = installDom();
+    try {
+        const ed = new MockEditor(MARKED_BROKEN, { line: 2, ch: 20 });
+        makePlugin(ed, { rowMarkers: false }).reformatTable();
+        assert.equal(ed.getValue().includes('<!--'), false,
+            'the old markers go, rather than being left embedded in the content');
+        assert.match(ed.getValue(), /<th>Task<\/th>/);
+    } finally {
+        restore();
+    }
+});
+
 test('the other ways of breaking a table are repaired too', () => {
     const restore = installDom();
     try {
